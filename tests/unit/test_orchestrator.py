@@ -361,3 +361,78 @@ async def test_compile_all_records_failed_source(tmp_path: Path) -> None:
     orchestrator = Orchestrator(config)
     result = await orchestrator.compile_all()
     assert "bad" in result.failed
+
+
+# ---------------------------------------------------------------------------
+# _generate_mcp_json() — session auth env vars
+# ---------------------------------------------------------------------------
+
+
+def test_generate_mcp_json_jwt_auth(tmp_path: Path) -> None:
+    """JWT auth sources set MCE_{SERVER}_AUTH env var."""
+    servers = [
+        {
+            "name": "weather",
+            "swagger_url": str(FIXTURES_DIR / "weather_api.yaml"),
+            "base_url": "https://api.weather.example.com/v1",
+            "auth_type": "jwt",
+            "auth_header": "${WEATHER_API_KEY}",
+        }
+    ]
+    _write_swagger_yaml(tmp_path, servers)
+    config = _make_config(tmp_path, str(tmp_path / "swaggers.yaml"))
+    orchestrator = Orchestrator(config)
+    sources = orchestrator.load_swagger_sources()
+
+    # Create a server directory with manifest to pass _find_latest_server_dir check
+    server_dir = tmp_path / "compiled" / "weather"
+    server_dir.mkdir(parents=True)
+    manifest_path = server_dir / "manifest.json"
+    manifest_path.write_text(json.dumps({"server_name": "weather"}), encoding="utf-8")
+
+    mcp_json_str = orchestrator._generate_mcp_json(sources)
+    assert mcp_json_str is not None
+    mcp_config = json.loads(mcp_json_str)
+
+    env = mcp_config["mcpServers"]["mcp-code-execution"]["env"]
+    assert "MCE_WEATHER_AUTH" in env
+    assert env["MCE_WEATHER_AUTH"] == "${WEATHER_API_KEY}"
+
+
+def test_generate_mcp_json_session_auth(tmp_path: Path) -> None:
+    """Session auth sources set MCE_{SERVER}_SESSION_* env vars."""
+    servers = [
+        {
+            "name": "myapp",
+            "swagger_url": str(FIXTURES_DIR / "weather_api.yaml"),
+            "base_url": "https://api.myapp.example.com",
+            "auth_type": "session",
+            "session_endpoint": "https://api.myapp.example.com/login",
+            "session_credentials": {"username": "${MYAPP_USERNAME}", "password": "${MYAPP_PASSWORD}"},
+            "session_cookie_name": "JSESSIONID",
+        }
+    ]
+    _write_swagger_yaml(tmp_path, servers)
+    config = _make_config(tmp_path, str(tmp_path / "swaggers.yaml"))
+    orchestrator = Orchestrator(config)
+    sources = orchestrator.load_swagger_sources()
+
+    # Create a server directory with manifest to pass _find_latest_server_dir check
+    server_dir = tmp_path / "compiled" / "myapp"
+    server_dir.mkdir(parents=True)
+    manifest_path = server_dir / "manifest.json"
+    manifest_path.write_text(json.dumps({"server_name": "myapp"}), encoding="utf-8")
+
+    mcp_json_str = orchestrator._generate_mcp_json(sources)
+    assert mcp_json_str is not None
+    mcp_config = json.loads(mcp_json_str)
+
+    env = mcp_config["mcpServers"]["mcp-code-execution"]["env"]
+    assert "MCE_MYAPP_SESSION_ENDPOINT" in env
+    assert env["MCE_MYAPP_SESSION_ENDPOINT"] == "https://api.myapp.example.com/login"
+    assert "MCE_MYAPP_SESSION_COOKIE_NAME" in env
+    assert env["MCE_MYAPP_SESSION_COOKIE_NAME"] == "JSESSIONID"
+    assert "MCE_MYAPP_SESSION_USERNAME" in env
+    assert env["MCE_MYAPP_SESSION_USERNAME"] == "${MYAPP_USERNAME}"
+    assert "MCE_MYAPP_SESSION_PASSWORD" in env
+    assert env["MCE_MYAPP_SESSION_PASSWORD"] == "${MYAPP_PASSWORD}"

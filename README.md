@@ -255,16 +255,23 @@ Explicit environment variables always take precedence over values in the `.env` 
 | `MCE_MAX_CODE_SIZE_BYTES` | `65536` | Maximum allowed code size (64 KB) |
 | `MCE_ALLOWED_DOMAINS` | — | Comma-separated API domain allowlist (empty = allow all) |
 | `MCE_{SERVER}_BASE_URL` | — | API base URL per server |
-| `MCE_{SERVER}_AUTH` | — | Auth header per server (e.g. `Authorization: Bearer <token>`) |
+| `MCE_{SERVER}_AUTH` | — | Auth header per server (JWT/Bearer only; e.g. `Authorization: Bearer <token>`) |
+| `MCE_{SERVER}_SESSION_ENDPOINT` | — | Session login endpoint (session auth only) |
+| `MCE_{SERVER}_SESSION_USERNAME` | — | Session auth username credential |
+| `MCE_{SERVER}_SESSION_PASSWORD` | — | Session auth password credential |
+| `MCE_{SERVER}_SESSION_COOKIE_NAME` | — | Session cookie name to extract (e.g. `JSESSIONID`) |
 | `MCE_{SERVER}_EXTRA_HEADERS` | — | JSON object of custom HTTP headers per server (e.g. `{"X-Version":"v1"}`) |
 
 ### Swagger Config (`config/swaggers.yaml`)
+
+#### JWT/Bearer Authentication (Default)
 
 ```yaml
 servers:
   - name: weather
     swagger_url: "https://api.weather.example.com/v1/openapi.json"
     base_url: "https://api.weather.example.com/v1"
+    auth_type: "jwt"                    # Default; can be omitted
     auth_header: "${WEATHER_API_KEY}"   # Resolved from env
     is_read_only: true                  # Omit POST/PUT/PATCH/DELETE at compile time
     extra_headers:                      # Optional: custom headers injected on every request
@@ -274,11 +281,47 @@ servers:
   - name: hotel_booking
     swagger_url: "./swaggers/hotel.yaml"   # Local file paths are supported
     base_url: "https://api.hotel.example.com/v2"
+    auth_type: "jwt"
     auth_header: "Bearer ${HOTEL_API_TOKEN}"
     is_read_only: false
 ```
 
 > If `auth_header` is omitted, the server is treated as a public API — no auth header is injected.
+
+#### Session-Based Authentication
+
+For enterprise APIs using session cookies (JSESSIONID, PHPSESSID, etc.):
+
+```yaml
+servers:
+  - name: my_app
+    swagger_url: "https://api.myapp.example.com/openapi.json"
+    base_url: "https://api.myapp.example.com"
+    auth_type: "session"
+    session_endpoint: "https://api.myapp.example.com/login"
+    session_credentials:
+      username: "${MYAPP_USERNAME}"     # Resolved from env
+      password: "${MYAPP_PASSWORD}"     # Resolved from env
+    session_cookie_name: "JSESSIONID"   # Cookie name to extract from login response
+    is_read_only: false
+```
+
+**How Session Auth Works:**
+
+1. On the first API call, MCE authenticates to `session_endpoint` with `session_credentials`
+2. Extracts the specified cookie from the response headers
+3. Caches the session cookie for the duration of code execution
+4. Injects the cookie into all subsequent API requests via the `Cookie` header
+5. Session state is cleared after execution completes (no cross-execution leakage)
+
+**Session Auth Environment Variables:**
+
+The compiler generates these env vars for session-authenticated servers:
+
+- `MCE_{SERVER}_SESSION_ENDPOINT` — Login endpoint URL
+- `MCE_{SERVER}_SESSION_USERNAME` — Username credential
+- `MCE_{SERVER}_SESSION_PASSWORD` — Password credential
+- `MCE_{SERVER}_SESSION_COOKIE_NAME` — Cookie name to extract (e.g. `JSESSIONID`)
 
 > `extra_headers` are serialized to `MCE_{SERVER}_EXTRA_HEADERS` (JSON string) at compile time and injected into every generated function call.
 

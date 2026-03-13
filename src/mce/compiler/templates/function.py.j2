@@ -13,15 +13,56 @@ from typing import Any{% if functions | selectattr("typeddict_classes") | list %
 import httpx
 
 _BASE_URL: str = os.environ["MCE_{{ server_name | upper }}_BASE_URL"]
-_AUTH_HEADER: str = os.environ.get("MCE_{{ server_name | upper }}_AUTH", "")
 _EXTRA_HEADERS: dict[str, str] = json.loads(os.environ.get("MCE_{{ server_name | upper }}_EXTRA_HEADERS", "{}"))
+
+{% if auth_type == "jwt" %}
+_AUTH_HEADER: str = os.environ.get("MCE_{{ server_name | upper }}_AUTH", "")
+{% elif auth_type == "session" %}
+_SESSION_ENDPOINT: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_ENDPOINT", "")
+_SESSION_USERNAME: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_USERNAME", "")
+_SESSION_PASSWORD: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_PASSWORD", "")
+_SESSION_COOKIE_NAME: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_COOKIE_NAME", "")
+_SESSION_COOKIE: str | None = None  # Cache during execution
+
+
+def _authenticate_session() -> str | None:
+    """Authenticate to session endpoint and extract cookie."""
+    global _SESSION_COOKIE
+    if _SESSION_COOKIE:
+        return _SESSION_COOKIE
+
+    try:
+        r = httpx.post(
+            _SESSION_ENDPOINT,
+            json={"username": _SESSION_USERNAME, "password": _SESSION_PASSWORD},
+            timeout=15.0,
+            verify=False,
+        )
+        r.raise_for_status()
+
+        # Extract cookie from response
+        if _SESSION_COOKIE_NAME in r.cookies:
+            _SESSION_COOKIE = r.cookies[_SESSION_COOKIE_NAME]
+            return _SESSION_COOKIE
+    except Exception:
+        pass
+    return None
+{% endif %}
 
 
 def _headers() -> dict[str, str]:
     """Build request headers, injecting auth and custom headers if configured."""
     h: dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json"}
+
+    {% if auth_type == "jwt" %}
     if _AUTH_HEADER:
         h["Authorization"] = _AUTH_HEADER
+    {% elif auth_type == "session" %}
+    cookie = _authenticate_session()
+    if cookie:
+        h["Cookie"] = f"{_SESSION_COOKIE_NAME}={cookie}"
+    {% endif %}
+
     h.update(_EXTRA_HEADERS)
     return h
 

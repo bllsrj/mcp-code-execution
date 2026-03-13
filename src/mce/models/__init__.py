@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Swagger / OpenAPI models (swagger.py namespace)
@@ -54,6 +54,7 @@ class ServerSpec(BaseModel):
     name: str
     description: str
     base_url: str
+    auth_type: str = "jwt"
     is_read_only: bool
     endpoints: list[EndpointSpec] = Field(default_factory=list)
     swagger_hash: str
@@ -70,10 +71,22 @@ class SwaggerSource(BaseModel):
     name: str
     swagger_url: str
     base_url: str
+    auth_type: str = "jwt"
     auth_header: str = ""
+    session_endpoint: str | None = None
+    session_credentials: dict[str, str] = Field(default_factory=dict)
+    session_cookie_name: str | None = None
     is_read_only: bool = False
     extra_headers: dict[str, str] = Field(default_factory=dict)
     headers: str = ""  # "[key1:value1,key2:value2]" format; parsed into extra_headers
+
+    @field_validator("auth_type")
+    @classmethod
+    def validate_auth_type(cls, v: str) -> str:
+        """Validate auth_type is either jwt or session."""
+        if v not in ("jwt", "session"):
+            raise ValueError(f"auth_type must be 'jwt' or 'session', got {v}")
+        return v
 
     @model_validator(mode="after")
     def _parse_headers(self) -> SwaggerSource:
@@ -83,6 +96,17 @@ class SwaggerSource(BaseModel):
                 if ":" in pair:
                     k, _, v = pair.partition(":")
                     self.extra_headers[k.strip()] = v.strip()
+        return self
+
+    @model_validator(mode="after")
+    def validate_auth_fields(self) -> SwaggerSource:
+        """Ensure session auth has required fields."""
+        if self.auth_type == "session" and (
+            not self.session_endpoint or not self.session_credentials or not self.session_cookie_name
+        ):
+            raise ValueError(
+                "session auth requires session_endpoint, session_credentials, and session_cookie_name"
+            )
         return self
 
 
@@ -129,36 +153,23 @@ class ExecutionResult(BaseModel):
     traceback: str | None = None  # Only populated in debug mode
     prints: str | None = None  # Captured stdout from print() calls in user code
     execution_time_ms: int = 0
-    cache_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
-# Cache models (cache.py namespace)
+# Reusable Function Library models (cache.py namespace)
 # ---------------------------------------------------------------------------
 
 
-class CacheEntry(BaseModel):
-    """A single entry in the code cache."""
+class ReusableFunction(BaseModel):
+    """Persistent, use-case-specific function in the library."""
 
-    id: str
+    name: str
     description: str
     code: str
     servers_used: list[str] = Field(default_factory=list)
-    swagger_hash: str
+    times_used: int = 1
     created_at: float
     last_used_at: float
-    use_count: int = 1
-    ttl_seconds: int = 3600
-
-
-class CacheSummary(BaseModel):
-    """Compact cache entry for listing (without full code)."""
-
-    id: str
-    description: str
-    servers_used: list[str]
-    use_count: int
-    created_at: float
 
 
 # ---------------------------------------------------------------------------

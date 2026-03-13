@@ -47,11 +47,15 @@ class MCEConfig(BaseSettings):
     max_output_size_bytes: int = 1_048_576  # 1MB
     network_mode: str = "mce_network"
 
-    # Cache
+    # Cache (legacy fields kept for backwards compatibility but unused)
     cache_enabled: bool = True
     cache_ttl_seconds: int = 3600
     cache_max_entries: int = 500
     cache_db_path: str = "./data/cache.db"
+
+    # Reusable Function Library
+    reusable_function_max_count: int = 50
+    reusable_function_ttl_days: int = 30
 
     # Security
     allowed_domains: list[str] = Field(default_factory=list)

@@ -187,9 +187,12 @@ async def _cmd_serve(config_args: argparse.Namespace) -> int:
         config.port = config_args.port
 
     # Initialize cache
-    cache = CacheStore(config.cache_db_path, config.cache_ttl_seconds, config.cache_max_entries)
+    cache = CacheStore(
+        config.cache_db_path,
+        max_functions=config.reusable_function_max_count,
+        ttl_days=config.reusable_function_ttl_days,
+    )
     await cache.initialize()
-    await cache.cleanup_expired()
 
     # Load registry
     registry = Registry(config.compiled_output_dir)

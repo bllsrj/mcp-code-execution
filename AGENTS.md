@@ -461,7 +461,7 @@ rejected at review, the same as a PR with failing tests.
 | **Tools / prompt table** | A tool or prompt is added, removed, or renamed in `server.py` |
 | **Quick Start** | Any CLI command in `__main__.py` changes, or setup steps change |
 | **Environment Variables table** | Any `MCEConfig` field is added, removed, or renamed |
-| **Swagger Config schema** | `SwaggerSource` model or `swaggers.yaml` format changes |
+| **Swagger Config schema** | `SwaggerSource` model or `swaggers.yaml` format changes (e.g., session auth fields added) |
 | **Security section** | `ast_guard.py`, `policies.py`, or Docker sandbox constraints change |
 | **Architecture diagram** | New modules, layers, or data-flow paths are introduced |
 | **How It Works / workflow** | Tool signatures, calling conventions, or response shapes change |

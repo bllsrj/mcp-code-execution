@@ -180,3 +180,93 @@ def test_sanitize_identifier_abbreviations() -> None:
     parser = SwaggerParser(source)
 
     assert parser._sanitize_identifier("getHTTPStatus") == "get_http_status"
+
+
+def test_swagger_source_default_auth_type() -> None:
+    """SwaggerSource defaults to jwt auth_type."""
+    source = SwaggerSource(
+        name="test",
+        swagger_url="https://example.com/openapi.json",
+        base_url="https://example.com",
+    )
+    assert source.auth_type == "jwt"
+
+
+def test_swagger_source_jwt_auth_type() -> None:
+    """SwaggerSource accepts explicit jwt auth_type."""
+    source = SwaggerSource(
+        name="test",
+        swagger_url="https://example.com/openapi.json",
+        base_url="https://example.com",
+        auth_type="jwt",
+        auth_header="Bearer token123",
+    )
+    assert source.auth_type == "jwt"
+    assert source.auth_header == "Bearer token123"
+
+
+def test_swagger_source_session_auth_type_valid() -> None:
+    """SwaggerSource accepts session auth_type with all required fields."""
+    source = SwaggerSource(
+        name="test",
+        swagger_url="https://example.com/openapi.json",
+        base_url="https://example.com",
+        auth_type="session",
+        session_endpoint="https://example.com/login",
+        session_credentials={"username": "user", "password": "pass"},
+        session_cookie_name="JSESSIONID",
+    )
+    assert source.auth_type == "session"
+    assert source.session_endpoint == "https://example.com/login"
+    assert source.session_credentials == {"username": "user", "password": "pass"}
+    assert source.session_cookie_name == "JSESSIONID"
+
+
+def test_swagger_source_session_auth_missing_endpoint_raises() -> None:
+    """Session auth without session_endpoint raises validation error."""
+    with pytest.raises(ValueError, match="session auth requires"):
+        SwaggerSource(
+            name="test",
+            swagger_url="https://example.com/openapi.json",
+            base_url="https://example.com",
+            auth_type="session",
+            session_credentials={"username": "user", "password": "pass"},
+            session_cookie_name="JSESSIONID",
+        )
+
+
+def test_swagger_source_session_auth_missing_credentials_raises() -> None:
+    """Session auth without session_credentials raises validation error."""
+    with pytest.raises(ValueError, match="session auth requires"):
+        SwaggerSource(
+            name="test",
+            swagger_url="https://example.com/openapi.json",
+            base_url="https://example.com",
+            auth_type="session",
+            session_endpoint="https://example.com/login",
+            session_cookie_name="JSESSIONID",
+        )
+
+
+def test_swagger_source_session_auth_missing_cookie_name_raises() -> None:
+    """Session auth without session_cookie_name raises validation error."""
+    with pytest.raises(ValueError, match="session auth requires"):
+        SwaggerSource(
+            name="test",
+            swagger_url="https://example.com/openapi.json",
+            base_url="https://example.com",
+            auth_type="session",
+            session_endpoint="https://example.com/login",
+            session_credentials={"username": "user", "password": "pass"},
+        )
+
+
+def test_swagger_source_invalid_auth_type_raises() -> None:
+    """Invalid auth_type raises validation error."""
+    with pytest.raises(ValueError, match="auth_type must be 'jwt' or 'session'"):
+        SwaggerSource(
+            name="test",
+            swagger_url="https://example.com/openapi.json",
+            base_url="https://example.com",
+            auth_type="oauth2",
+        )

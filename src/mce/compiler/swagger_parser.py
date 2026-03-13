@@ -68,6 +68,7 @@ class SwaggerParser:
             name=self._source.name,
             description=description,
             base_url=self._source.base_url,
+            auth_type=self._source.auth_type,
             is_read_only=self._source.is_read_only,
             endpoints=endpoints,
             swagger_hash=doc_hash,

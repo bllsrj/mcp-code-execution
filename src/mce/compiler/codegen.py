@@ -357,6 +357,7 @@ class CodeGenerator:
                 server_name=spec.name,
                 description=spec.description,
                 base_url=spec.base_url,
+                auth_type=spec.auth_type,
                 is_read_only=spec.is_read_only,
                 functions=functions_data,
                 header_desc_width=header_desc_width,

@@ -2,11 +2,24 @@ servers:
   - name: weather
     swagger_url: "https://api.weather.example.com/v1/openapi.json"
     base_url: "https://api.weather.example.com/v1"
+    auth_type: "jwt"              # "jwt" (default) or "session"
     auth_header: "${WEATHER_API_KEY}"
     is_read_only: true
 
   - name: hotel_booking
     swagger_url: "./swaggers/hotel.yaml"
     base_url: "https://api.hotel.example.com/v2"
+    auth_type: "jwt"
     auth_header: "Bearer ${HOTEL_API_TOKEN}"
+    is_read_only: false
+
+  - name: my_app                  # Example with session authentication
+    swagger_url: "https://api.myapp.example.com/openapi.json"
+    base_url: "https://api.myapp.example.com"
+    auth_type: "session"
+    session_endpoint: "https://api.myapp.example.com/login"
+    session_credentials:
+      username: "${MYAPP_USERNAME}"
+      password: "${MYAPP_PASSWORD}"
+    session_cookie_name: "JSESSIONID"
     is_read_only: false

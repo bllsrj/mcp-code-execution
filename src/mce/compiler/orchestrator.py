@@ -341,8 +341,18 @@ class Orchestrator:
         for src in sources:
             env_prefix = src.name.upper()
             env[f"MCE_{env_prefix}_BASE_URL"] = src.base_url
-            if src.auth_header:
-                env[f"MCE_{env_prefix}_AUTH"] = src.auth_header
+
+            if src.auth_type == "jwt":
+                if src.auth_header:
+                    env[f"MCE_{env_prefix}_AUTH"] = src.auth_header
+            elif src.auth_type == "session":
+                if src.session_endpoint:
+                    env[f"MCE_{env_prefix}_SESSION_ENDPOINT"] = src.session_endpoint
+                if src.session_cookie_name:
+                    env[f"MCE_{env_prefix}_SESSION_COOKIE_NAME"] = src.session_cookie_name
+                for key, val in src.session_credentials.items():
+                    env[f"MCE_{env_prefix}_SESSION_{key.upper()}"] = val
+
             if src.extra_headers:
                 env[f"MCE_{env_prefix}_EXTRA_HEADERS"] = json.dumps(src.extra_headers)
 

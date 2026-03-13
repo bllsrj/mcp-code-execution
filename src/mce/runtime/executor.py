@@ -12,7 +12,6 @@ from mce.errors import ExecutionError, ExecutionTimeoutError, LintError, Securit
 from mce.models import ExecutionResult
 from mce.security.ast_guard import ASTGuard
 from mce.security.vault import build_all_server_env_vars
-from mce.utils.hashing import combine_hashes
 from mce.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -105,12 +104,6 @@ class CodeExecutor:
         # Parse output
         result = self._parse_output(raw_output, elapsed_ms)
 
-        # Cache on success
-        if result.success and self._config.cache_enabled:
-            swagger_hash = self._compute_swagger_hash(servers_used)
-            cache_id = await self._cache.store(code, description, servers_used, swagger_hash)
-            result.cache_id = cache_id
-
         logger.info(
             "code_executed",
             success=result.success,
@@ -120,6 +113,38 @@ class CodeExecutor:
         )
 
         return result
+
+    async def validate_code_only(self, code: str) -> tuple[bool, str | None]:
+        """Validate code without executing it (for reusable function library).
+
+        Args:
+            code: Python code to validate.
+
+        Returns:
+            Tuple of (is_valid, error_message).
+        """
+        try:
+            # Enforce code size limit
+            if len(code.encode()) > self._config.max_code_size_bytes:
+                return (
+                    False,
+                    f"Code size {len(code.encode())} bytes exceeds limit of {self._config.max_code_size_bytes}",
+                )
+
+            # Security scan
+            self._ast_guard.validate(code, context="reusable_function_validation")
+
+            # Lint check (if enabled)
+            if self._config.lint_enabled:
+                self._lint_code(code)
+
+            return True, None
+        except SecurityViolationError as exc:
+            return False, str(exc)
+        except LintError as exc:
+            return False, f"Lint error: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Validation error: {exc}"
 
     def _lint_code(self, code: str) -> None:
         """Run ruff linting on the code string.
@@ -289,23 +314,3 @@ _sys.path.insert(0, {self._CONTAINER_COMPILED_PATH!r})
                 data=truncated,
                 execution_time_ms=elapsed_ms,
             )
-
-    def _compute_swagger_hash(self, servers_used: list[str]) -> str:
-        """Compute combined swagger hash for servers used by code.
-
-        Args:
-            servers_used: List of server names.
-
-        Returns:
-            Combined hash string, or "unknown" if registry unavailable.
-        """
-        # Import here to avoid circular imports
-        try:
-            from mce.runtime.registry import Registry  # noqa: PLC0415
-
-            registry = Registry(self._config.compiled_output_dir)
-            registry.load()
-            hashes = [registry.get_swagger_hash(name) for name in servers_used if name]
-            return combine_hashes(*hashes) if hashes else "no-servers"
-        except Exception:  # noqa: BLE001
-            return "unknown"
