@@ -94,7 +94,7 @@ def _authenticate_session(instance: str, force: bool = False) -> str | None:
     try:
         r = httpx.post(
             session_url,
-            json={"username": config["session_username"], "password": config["session_password"]},
+            data={"username": config["session_username"], "password": config["session_password"]},
             timeout=15.0,
             verify=False,
         )
@@ -107,6 +107,20 @@ def _authenticate_session(instance: str, force: bool = False) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _initialize_sessions() -> None:
+    """Pre-authenticate all configured instances on module load.
+
+    This ensures session cookies are cached and ready before the first API call,
+    avoiding delays on initial requests.
+    """
+    for instance_name in _INSTANCES:
+        _authenticate_session(instance_name, force=False)
+
+
+# Authenticate all instances when module is imported
+_initialize_sessions()
 {% endif %}
 
 
