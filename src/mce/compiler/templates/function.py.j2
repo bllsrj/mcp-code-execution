@@ -43,7 +43,10 @@ def _load_instances() -> None:
                 {% elif auth_type == "jwt" %}
                 "auth_header": os.environ.get(f"MCE_{{ server_name | upper }}_{instance_name.upper()}_AUTH", ""),
                 {% endif %}
-                "is_read_only": os.environ.get(f"MCE_{{ server_name | upper }}_{instance_name.upper()}_IS_READ_ONLY", "false").lower() == "true",
+                "is_read_only": (
+                    os.environ.get(f"MCE_{{ server_name | upper }}_{instance_name.upper()}_IS_READ_ONLY", "false").lower()
+                    == "true"
+                ),
             }
 
             {% if auth_type == "session" %}
@@ -107,13 +110,17 @@ def _authenticate_session(instance: str, force: bool = False) -> str | None:
 {% endif %}
 
 
-def _headers(instance: str) -> dict[str, str]:
-    """Build request headers for specified instance, injecting auth and custom headers if configured."""
-    h: dict[str, str] = {"Content-Type": "application/json", "Accept": "application/xml"}
+def _headers(instance: str, accept_header: str | None = None) -> dict[str, str]:
+    """Build request headers for specified instance, injecting auth and custom headers if configured.
 
-    config = _get_instance_config(instance)
+    Args:
+        instance: Instance name to use.
+        accept_header: Optional Accept header value; defaults to application/xml if not provided.
+    """
+    h: dict[str, str] = {"Content-Type": "application/json", "Accept": accept_header or "application/xml"}
 
     {% if auth_type == "jwt" %}
+    config = _get_instance_config(instance)
     if config.get("auth_header"):
         h["Authorization"] = config["auth_header"]
     {% elif auth_type == "session" %}
@@ -126,6 +133,27 @@ def _headers(instance: str) -> dict[str, str]:
     return h
 
 
+def _build_accept_header(content_types: list[str]) -> str:
+    """Build an Accept header string from available content types.
+
+    Prefers XML, then JSON, then other formats. If no types are documented in
+    swagger, uses a wildcard to accept any content type (since some endpoints
+    return text/plain or other undocumented types).
+
+    Args:
+        content_types: List of available content types (e.g., ["application/xml", "application/json"]).
+
+    Returns:
+        Accept header value string (e.g., "application/xml, application/json" or "*/*").
+    """
+    if not content_types:
+        # No content types documented: use wildcard to accept any response type
+        # (some endpoints return text/plain or other undocumented types)
+        return "*/*"
+    # Join with quality factors: first type highest priority, others lower
+    return ", ".join(content_types)
+
+
 def _request(
     method: str,
     path: str,
@@ -133,6 +161,7 @@ def _request(
     base_url: str | None = None,
     params: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
+    accept_header: str | None = None,
 ) -> Any:
     """Execute an HTTP request against the {{ server_name }} API for specified instance.
 
@@ -143,6 +172,7 @@ def _request(
         base_url: Per-endpoint base URL override; falls back to instance base_url.
         params: Optional query parameters.
         json_body: Optional JSON request body.
+        accept_header: Optional Accept header value for content negotiation.
 
     Returns:
         Parsed JSON response.
@@ -177,7 +207,7 @@ def _request(
     r = httpx.request(
         method,
         url,
-        headers=_headers(instance),
+        headers=_headers(instance, accept_header=accept_header),
         json=json_body,
         timeout=15.0,
         verify=False,
@@ -190,7 +220,7 @@ def _request(
         r = httpx.request(
             method,
             url,
-            headers=_headers(instance),  # Get new headers with fresh cookie
+            headers=_headers(instance, accept_header=accept_header),  # Get new headers with fresh cookie
             json=json_body,
             timeout=15.0,
             verify=False,
@@ -269,6 +299,7 @@ def {{ fn.name }}({% if fn.signature %}{{ fn.signature }}, *, {% endif %}instanc
         {% else %}
         json_body=None,
         {% endif %}
+        accept_header=_build_accept_header({{ fn.response_content_types }}),
     )
 
 {% endfor %}

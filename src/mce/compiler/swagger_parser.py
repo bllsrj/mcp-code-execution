@@ -241,6 +241,7 @@ class SwaggerParser:
             request_body_schema = self._parse_request_body(operation.get("requestBody", {}))
 
         response_schema = self._parse_response_schema(operation.get("responses", {}))
+        response_content_types = self._extract_response_content_types(operation.get("responses", {}))
 
         # Operation-level servers override the global base URL
         op_servers: list[Any] = operation.get("servers", [])
@@ -257,6 +258,7 @@ class SwaggerParser:
             response_schema=response_schema,
             tags=operation.get("tags", []),
             base_url=op_base_url,
+            response_content_types=response_content_types,
         )
 
     def _generate_operation_id(self, method: str, path: str) -> str:
@@ -382,6 +384,43 @@ class SwaggerParser:
                 if not isinstance(resp, dict):
                     continue
                 return self._extract_response_fields(resp)
+
+        return []
+
+    def _extract_response_content_types(self, responses: dict[str, Any]) -> list[str]:
+        """Extract available response content types from responses object.
+
+        Prefers XML, then JSON, then other formats. Returns all available types
+        in priority order: ["application/xml"] or ["application/json"] or
+        whatever is available.
+
+        Args:
+            responses: Responses object from swagger operation.
+
+        Returns:
+            List of content types, empty if no response found.
+        """
+        for status_code in ("200", "201", "200-299"):
+            if status_code in responses:
+                resp = responses[status_code]
+                if not isinstance(resp, dict):
+                    continue
+                content = resp.get("content", {})
+                if not content:
+                    return []
+
+                # Build priority list: XML first, then JSON, then others
+                content_types: list[str] = []
+                if "application/xml" in content:
+                    content_types.append("application/xml")
+                if "application/json" in content:
+                    content_types.append("application/json")
+                # Add any other types (except already added)
+                for ct in content.keys():
+                    if ct not in content_types:
+                        content_types.append(ct)
+
+                return content_types
 
         return []
 

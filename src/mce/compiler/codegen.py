@@ -401,4 +401,5 @@ class CodeGenerator:
             "base_url": endpoint.base_url,
             "return_type": _build_return_type(endpoint),
             "typeddict_classes": _build_typeddict_classes(endpoint),
+            "response_content_types": endpoint.response_content_types,
         }

@@ -46,6 +46,7 @@ class EndpointSpec(BaseModel):
     response_schema: list[ResponseField] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     base_url: str = ""  # Override base URL for this endpoint (from operation-level servers)
+    response_content_types: list[str] = Field(default_factory=list)  # Available response content types, e.g., ["application/xml", "application/json"]
 
 
 class ServerSpec(BaseModel):
