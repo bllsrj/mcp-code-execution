@@ -38,12 +38,13 @@ def resolve_env_references(value: str) -> str:
 def build_server_env_vars(server_name: str) -> dict[str, str]:
     """Build environment variable dict for a server's Docker container.
 
-    Reads MCE_<SERVER>_BASE_URL and MCE_<SERVER>_AUTH from the host environment
-    and returns them for injection into the sandbox container. Credentials are
-    NEVER embedded in generated code.
+    Scans all environment variables matching MCE_<SERVER>_* pattern and passes them
+    to the sandbox container. This includes:
+    - Server-level config: MCE_MIRTH_SESSION_COOKIE_NAME, MCE_MIRTH_SESSION_ENDPOINT, MCE_MIRTH_EXTRA_HEADERS
+    - Instance-specific: MCE_MIRTH_<INSTANCE>_BASE_URL, MCE_MIRTH_<INSTANCE>_SESSION_USERNAME, etc.
 
     Args:
-        server_name: Name of the server (e.g., "weather").
+        server_name: Name of the server (e.g., "mirth").
 
     Returns:
         Dict of environment variables ready for Docker container injection.
@@ -51,23 +52,11 @@ def build_server_env_vars(server_name: str) -> dict[str, str]:
     prefix = f"MCE_{server_name.upper()}_"
     env_vars: dict[str, str] = {}
 
-    base_url_key = f"{prefix}BASE_URL"
-    auth_key = f"{prefix}AUTH"
-    extra_headers_key = f"{prefix}EXTRA_HEADERS"
-
-    base_url = os.environ.get(base_url_key, "")
-    auth = os.environ.get(auth_key, "")
-    extra_headers = os.environ.get(extra_headers_key, "")
-
-    if base_url:
-        env_vars[base_url_key] = base_url
-
-    if auth:
-        # Resolve any ${VAR} references in auth header value
-        env_vars[auth_key] = resolve_env_references(auth)
-
-    if extra_headers:
-        env_vars[extra_headers_key] = extra_headers
+    # Scan all environment variables for this server
+    for key, value in os.environ.items():
+        if key.startswith(prefix):
+            # Pass through all server-related env vars
+            env_vars[key] = value
 
     return env_vars
 

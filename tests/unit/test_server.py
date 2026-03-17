@@ -69,6 +69,7 @@ def _make_mock_registry() -> MagicMock:
     fn_info.parameters = []
     fn_info.response_fields = []
     fn_info.source_code = "def get_current_weather(): pass"
+    fn_info.return_type = "dict[str, Any]"
     registry.get_function.return_value = fn_info
     return registry
 
@@ -136,15 +137,16 @@ async def test_list_servers_returns_server_info(tmp_path: Path) -> None:
     assert result["servers"][0]["name"] == "weather"
 
 
-async def test_list_servers_returns_function_list(tmp_path: Path) -> None:
+async def test_list_servers_returns_instances(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     registry = _make_mock_registry()
     cache = _make_mock_cache()
     mcp = create_server(config, registry=registry, cache=cache)
 
     result = _toon_decode(await _call_tool(mcp, "list_servers"))
-    functions = result["servers"][0]["functions"]
-    assert any(f["name"] == "get_current_weather" for f in functions)
+    assert "instances" in result["servers"][0]
+    # Should not return functions list
+    assert "functions" not in result["servers"][0]
 
 
 async def test_list_servers_handles_exception(tmp_path: Path) -> None:
@@ -163,85 +165,77 @@ async def test_list_servers_handles_exception(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_get_functions_returns_function_details(tmp_path: Path) -> None:
+async def test_get_functions_returns_read_only_functions(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     registry = _make_mock_registry()
     cache = _make_mock_cache()
     mcp = create_server(config, registry=registry, cache=cache)
 
-    result = _toon_decode(
-        await _call_tool(
-            mcp,
-            "get_functions",
-            functions=[{"server_name": "weather", "function_name": "get_current_weather"}],
-        )
-    )
+    result = _toon_decode(await _call_tool(mcp, "get_functions", server_name="weather", read_only=True))
     assert "functions" in result
-    fn = result["functions"][0]
-    assert fn["function"] == "get_current_weather"
-    assert fn["method"] == "GET"
-    assert "import_statement" in fn
+    assert result["server"] == "weather"
+    assert result["read_only"] is True
+    # Should include GET method
+    assert any(f["name"] == "get_current_weather" and f["method"] == "GET" for f in result["functions"])
 
 
-async def test_get_functions_batch_two_functions(tmp_path: Path) -> None:
+async def test_get_functions_filters_by_method(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     registry = _make_mock_registry()
     cache = _make_mock_cache()
     mcp = create_server(config, registry=registry, cache=cache)
 
-    result = _toon_decode(
-        await _call_tool(
-            mcp,
-            "get_functions",
-            functions=[
-                {"server_name": "weather", "function_name": "get_current_weather"},
-                {"server_name": "weather", "function_name": "get_current_weather"},
-            ],
-        )
-    )
-    assert len(result["functions"]) == 2
-
-
-async def test_get_functions_rejects_more_than_five(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    result = _toon_decode(
-        await _call_tool(
-            mcp,
-            "get_functions",
-            functions=[{"server_name": "weather", "function_name": "f"}] * 6,
-        )
-    )
-    assert result["error_type"] == "validation"
-
-
-async def test_get_functions_rejects_empty_list(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    result = _toon_decode(await _call_tool(mcp, "get_functions", functions=[]))
-    assert result["error_type"] == "validation"
+    # Test read_only=True returns only GET
+    result = _toon_decode(await _call_tool(mcp, "get_functions", server_name="weather", read_only=True))
+    for fn in result["functions"]:
+        assert fn["method"] == "GET"
 
 
 async def test_get_functions_server_not_found(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = _toon_decode(await _call_tool(mcp, "get_functions", server_name="nonexistent", read_only=True))
+    assert "error" in result
+    assert result["error_type"] == "server_not_found"
+
+
+# ---------------------------------------------------------------------------
+# get_function_details tool
+# ---------------------------------------------------------------------------
+
+
+async def test_get_function_details_returns_signature(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = _toon_decode(
+        await _call_tool(mcp, "get_function_details", server_name="weather", function_name="get_current_weather")
+    )
+    assert result["function"] == "get_current_weather"
+    assert result["method"] == "GET"
+    assert "import_statement" in result
+    assert "parameters" in result
+    assert "response_fields" in result
+
+
+async def test_get_function_details_server_not_found(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     registry = _make_mock_registry()
     registry.get_function.side_effect = ServerNotFoundError("not found")
     cache = _make_mock_cache()
     mcp = create_server(config, registry=registry, cache=cache)
 
-    result = _toon_decode(
-        await _call_tool(mcp, "get_functions", functions=[{"server_name": "ghost", "function_name": "fn"}])
-    )
-    assert result["functions"][0]["error_type"] == "server_not_found"
+    result = _toon_decode(await _call_tool(mcp, "get_function_details", server_name="ghost", function_name="fn"))
+    assert "error" in result
+    assert result["error_type"] == "server_not_found"
 
 
-async def test_get_functions_function_not_found(tmp_path: Path) -> None:
+async def test_get_function_details_function_not_found(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     registry = _make_mock_registry()
     registry.get_function.side_effect = FunctionNotFoundError("fn not found")
@@ -249,22 +243,10 @@ async def test_get_functions_function_not_found(tmp_path: Path) -> None:
     mcp = create_server(config, registry=registry, cache=cache)
 
     result = _toon_decode(
-        await _call_tool(mcp, "get_functions", functions=[{"server_name": "weather", "function_name": "ghost"}])
+        await _call_tool(mcp, "get_function_details", server_name="weather", function_name="nonexistent")
     )
-    assert result["functions"][0]["error_type"] == "function_not_found"
-
-
-async def test_get_functions_unexpected_error(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    registry.get_function.side_effect = RuntimeError("unexpected")
-    cache = _make_mock_cache()
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    result = _toon_decode(
-        await _call_tool(mcp, "get_functions", functions=[{"server_name": "weather", "function_name": "fn"}])
-    )
-    assert result["functions"][0]["error_type"] == "internal"
+    assert "error" in result
+    assert result["error_type"] == "function_not_found"
 
 
 # ---------------------------------------------------------------------------
@@ -375,155 +357,6 @@ async def test_execute_code_unexpected_error(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_cache_entry(code: str = "result = 1", description: str = "cached code") -> MagicMock:
-    entry = MagicMock()
-    entry.code = code
-    entry.description = description
-    return entry
-
-
-async def test_run_cached_code_not_found(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    cache.get = AsyncMock(return_value=None)
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    result = await _call_tool(mcp, "run_cached_code", cache_id="nonexistent_id_here", params=None)
-    assert result["success"] is False
-    assert result["error_type"] == "cache_miss"
-
-
-async def test_run_cached_code_cache_error_on_get(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    cache.get = AsyncMock(side_effect=CacheError("DB unavailable"))
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    result = await _call_tool(mcp, "run_cached_code", cache_id="some_id", params=None)
-    assert result["success"] is False
-    assert result["error_type"] == "cache"
-
-
-async def test_run_cached_code_success(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    cache.get = AsyncMock(return_value=_make_cache_entry("result = 42", "compute 42"))
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    with patch(
-        "mce.runtime.executor.CodeExecutor.execute",
-        new=AsyncMock(return_value=ExecutionResult(success=True, data={"result": 42}, execution_time_ms=50)),
-    ):
-        result = await _call_tool(mcp, "run_cached_code", cache_id="abc123", params=None)
-
-    assert result["success"] is True
-
-
-async def test_run_cached_code_with_params_injects_variables(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    cache.get = AsyncMock(return_value=_make_cache_entry("result = output_format", "format code"))
-
-    captured_code: list[str] = []
-
-    async def fake_execute(code: str, description: str) -> ExecutionResult:
-        captured_code.append(code)
-        return ExecutionResult(success=True, data="json", execution_time_ms=50)
-
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    with patch("mce.runtime.executor.CodeExecutor.execute", new=AsyncMock(side_effect=fake_execute)):
-        await _call_tool(mcp, "run_cached_code", cache_id="abc123", params={"output_format": "json"})
-
-    assert len(captured_code) == 1
-    assert "output_format" in captured_code[0]
-    assert "json" in captured_code[0]
-
-
-async def test_run_cached_code_security_violation(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    cache.get = AsyncMock(return_value=_make_cache_entry())
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    with patch(
-        "mce.runtime.executor.CodeExecutor.execute",
-        new=AsyncMock(side_effect=SecurityViolationError("bad")),
-    ):
-        result = await _call_tool(mcp, "run_cached_code", cache_id="abc123", params=None)
-
-    assert result["error_type"] == "security"
-
-
-async def test_run_cached_code_lint_error(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    cache.get = AsyncMock(return_value=_make_cache_entry())
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    with patch(
-        "mce.runtime.executor.CodeExecutor.execute",
-        new=AsyncMock(side_effect=LintError("lint fail", lint_output="E501")),
-    ):
-        result = await _call_tool(mcp, "run_cached_code", cache_id="abc123", params=None)
-
-    assert result["error_type"] == "lint"
-
-
-async def test_run_cached_code_timeout(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    cache.get = AsyncMock(return_value=_make_cache_entry())
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    with patch(
-        "mce.runtime.executor.CodeExecutor.execute",
-        new=AsyncMock(side_effect=ExecutionTimeoutError("timeout", exit_code=124)),
-    ):
-        result = await _call_tool(mcp, "run_cached_code", cache_id="abc123", params=None)
-
-    assert result["error_type"] == "timeout"
-
-
-async def test_run_cached_code_execution_error(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    cache.get = AsyncMock(return_value=_make_cache_entry())
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    with patch(
-        "mce.runtime.executor.CodeExecutor.execute",
-        new=AsyncMock(side_effect=ExecutionError("crash", stderr="oom", exit_code=137)),
-    ):
-        result = await _call_tool(mcp, "run_cached_code", cache_id="abc123", params=None)
-
-    assert result["error_type"] == "execution"
-
-
-async def test_run_cached_code_unexpected_error(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    registry = _make_mock_registry()
-    cache = _make_mock_cache()
-    cache.get = AsyncMock(return_value=_make_cache_entry())
-    mcp = create_server(config, registry=registry, cache=cache)
-
-    with patch(
-        "mce.runtime.executor.CodeExecutor.execute",
-        new=AsyncMock(side_effect=RuntimeError("unexpected")),
-    ):
-        result = await _call_tool(mcp, "run_cached_code", cache_id="abc123", params=None)
-
-    assert result["error_type"] == "internal"
-
-
 # ---------------------------------------------------------------------------
 # initialize_server
 # ---------------------------------------------------------------------------
@@ -536,10 +369,7 @@ async def test_initialize_server_logs_and_returns(tmp_path: Path) -> None:
 
     mcp = FastMCP(name="test")
 
-    with (
-        patch("mce.runtime.cache.CacheStore.initialize", new=AsyncMock()),
-        patch("mce.runtime.cache.CacheStore.cleanup_expired", new=AsyncMock(return_value=0)),
-    ):
+    with patch("mce.runtime.cache.CacheStore.initialize", new=AsyncMock()):
         await initialize_server(config, mcp)  # must not raise
 
 

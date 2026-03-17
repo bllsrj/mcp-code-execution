@@ -108,3 +108,15 @@ def sample_server_spec(sample_endpoint: EndpointSpec) -> ServerSpec:
         endpoints=[sample_endpoint],
         swagger_hash="abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
     )
+
+
+@pytest.fixture
+def sample_swagger_source() -> SwaggerSource:
+    """A minimal SwaggerSource matching sample_server_spec."""
+    return SwaggerSource(
+        name="weather",
+        swagger_url="https://api.weather.example.com/v1/openapi.json",
+        base_url="https://api.weather.example.com/v1",
+        auth_type="jwt",
+        is_read_only=True,
+    )

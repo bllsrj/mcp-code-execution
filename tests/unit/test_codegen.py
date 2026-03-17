@@ -30,12 +30,14 @@ def test_generated_code_contains_function_name(sample_server_spec: ServerSpec) -
 
 
 def test_generated_code_contains_base_url_env(sample_server_spec: ServerSpec) -> None:
-    """Generated code reads BASE_URL from environment variable."""
+    """Generated code discovers instances by scanning for BASE_URL env vars."""
     gen = CodeGenerator()
     code = gen.generate(sample_server_spec)
 
-    assert "MCE_WEATHER_BASE_URL" in code
-    assert 'os.environ["MCE_WEATHER_BASE_URL"]' in code
+    # Multi-instance pattern: scans for MCE_{SERVER}_{INSTANCE}_BASE_URL
+    assert "MCE_WEATHER_" in code
+    assert "_BASE_URL" in code
+    assert "os.environ" in code
 
 
 def test_generated_code_never_hardcodes_credentials(sample_server_spec: ServerSpec) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from mce.errors import FunctionNotFoundError, ServerNotFoundError
 from mce.models import EndpointManifest, FunctionInfo, ParamSchema, ResponseField, ServerInfo, ServerManifest
@@ -13,46 +14,45 @@ logger = get_logger(__name__)
 
 
 class Registry:
-    """Loads and indexes compiled server manifests for fast LLM tool lookups."""
+    """Loads and indexes the compiled API manifest for fast LLM tool lookups."""
 
     def __init__(self, compiled_dir: str) -> None:
         """Initialize the registry from the compiled output directory.
 
         Args:
-            compiled_dir: Path to directory containing compiled server subdirectories.
+            compiled_dir: Path to directory containing compiled mirth subdirectory.
         """
         self._compiled_dir = Path(compiled_dir)
-        self._servers: dict[str, ServerManifest] = {}
+        self._manifest: ServerManifest | None = None
         self._function_source_cache: dict[str, str] = {}
 
     def load(self) -> None:
-        """Load all compiled server manifests from the compiled directory.
+        """Load the compiled manifest from the mirth directory.
 
-        Scans compiled_dir for subdirectories with manifest.json files
-        and loads each into memory for fast lookup.
+        Loads the manifest.json file from compiled/mirth/ into memory for fast lookup.
         """
-        self._servers.clear()
+        self._manifest = None
         self._function_source_cache.clear()
 
         if not self._compiled_dir.exists():
             logger.warning("compiled_dir_not_found", path=str(self._compiled_dir))
             return
 
-        manifest_files = list(self._compiled_dir.glob("*/manifest.json"))
-        for manifest_path in manifest_files:
+        # Load the single mirth manifest
+        manifest_path = self._compiled_dir / "mirth" / "manifest.json"
+        if manifest_path.exists():
             try:
                 self._load_manifest(manifest_path)
             except Exception as exc:  # noqa: BLE001
                 logger.error("manifest_load_failed", path=str(manifest_path), error=str(exc))
 
-        logger.info(
-            "registry_loaded",
-            servers=len(self._servers),
-            total_functions=sum(len(s.endpoints) for s in self._servers.values()),
-        )
+        if self._manifest:
+            logger.info("registry_loaded", total_functions=len(self._manifest.endpoints))
+        else:
+            logger.warning("no_manifest_loaded")
 
     def _load_manifest(self, manifest_path: Path) -> None:
-        """Load and index a single server manifest file.
+        """Load the manifest file.
 
         Args:
             manifest_path: Path to manifest.json file.
@@ -60,54 +60,62 @@ class Registry:
         with open(manifest_path, encoding="utf-8") as f:
             raw = json.load(f)
 
-        manifest = ServerManifest(**raw)
-        # Index by directory name (valid Python identifier) so imports like
-        # `from open_meteo_weather_api.functions import …` resolve correctly.
-        module_name = manifest_path.parent.name
-        self._servers[module_name] = manifest
-        logger.debug("manifest_loaded", server=module_name, endpoints=len(manifest.endpoints))
+        self._manifest = ServerManifest(**raw)
+        logger.debug("manifest_loaded", endpoints=len(self._manifest.endpoints))
 
-    def list_servers(self) -> list[ServerInfo]:
-        """Return summary information about all compiled servers.
+    def list_instances(self) -> list[Any]:
+        """Return list of available instances.
 
         Returns:
-            List of ServerInfo objects with function name/summary lists.
+            List of InstanceInfo objects.
         """
-        result: list[ServerInfo] = []
-        for name, manifest in self._servers.items():
-            result.append(
-                ServerInfo(
-                    name=name,
-                    description=manifest.description,
-                    functions=[ep.function_name for ep in manifest.endpoints],
-                    function_summaries={ep.function_name: ep.summary for ep in manifest.endpoints},
-                )
-            )
-        return result
+        from mce.models import InstanceInfo
 
-    def get_function(self, server_name: str, function_name: str) -> FunctionInfo:
-        """Get detailed function information by server and function name.
+        if not self._manifest:
+            return []
+
+        return [
+            InstanceInfo(
+                instance_name=inst["instance_name"],
+                base_url=inst["base_url"],
+                is_read_only=inst["is_read_only"],
+            )
+            for inst in self._manifest.instances
+        ]
+
+    def list_function_names(self) -> list[str]:
+        """Return list of all function names.
+
+        Returns:
+            List of function names.
+        """
+        if not self._manifest:
+            return []
+        return [ep.function_name for ep in self._manifest.endpoints]
+
+
+    def get_function(self, function_name: str) -> FunctionInfo:
+        """Get detailed function information by function name.
 
         Args:
-            server_name: Name of the server.
             function_name: Name of the function.
 
         Returns:
             FunctionInfo with full parameter and response schema.
 
         Raises:
-            ServerNotFoundError: If server doesn't exist in registry.
-            FunctionNotFoundError: If function doesn't exist in server.
+            FunctionNotFoundError: If function doesn't exist.
         """
-        manifest = self._get_server_manifest(server_name)
-        endpoint = self._find_endpoint(manifest, server_name, function_name)
+        if not self._manifest:
+            raise FunctionNotFoundError(f"No manifest loaded")
 
-        source_code = self._get_function_source(server_name, function_name)
+        endpoint = self._find_endpoint(function_name)
+        source_code = self._get_function_source(function_name)
         parameters = self._parse_parameters_summary(endpoint.parameters_summary)
         response_fields = self._parse_response_summary(endpoint.response_summary)
 
         return FunctionInfo(
-            server_name=server_name,
+            server_name="mirth",  # Hardcoded since there's only one API
             function_name=function_name,
             summary=endpoint.summary,
             parameters=parameters,
@@ -118,87 +126,54 @@ class Registry:
             path=endpoint.path,
         )
 
-    def get_function_source(self, server_name: str, function_name: str) -> str:
+    def get_function_source(self, function_name: str) -> str:
         """Get the Python source code for a specific function.
 
         Args:
-            server_name: Server name.
             function_name: Function name.
 
         Returns:
             Python source code string for the function.
 
         Raises:
-            ServerNotFoundError: If server not found.
             FunctionNotFoundError: If function not found.
         """
-        self._get_server_manifest(server_name)  # Validate server exists
-        return self._get_function_source(server_name, function_name)
+        return self._get_function_source(function_name)
 
-    def get_swagger_hash(self, server_name: str) -> str:
-        """Get the swagger hash for a compiled server.
-
-        Args:
-            server_name: Server name.
+    def get_swagger_hash(self) -> str:
+        """Get the swagger hash for the compiled API.
 
         Returns:
-            Swagger hash string.
-
-        Raises:
-            ServerNotFoundError: If server not found.
+            Swagger hash string, or empty string if no manifest loaded.
         """
-        manifest = self._get_server_manifest(server_name)
-        return manifest.swagger_hash
+        if not self._manifest:
+            return ""
+        return self._manifest.swagger_hash
 
-    def has_skills(self, server_name: str) -> bool:
-        """Return True if a compiled skills.md document exists for the server.
+    def has_skills(self) -> bool:
+        """Return True if a compiled skills.md document exists.
 
         Uses file-system presence as the authoritative check so that the result
         stays correct even after an incremental skills-only refresh.
 
-        Args:
-            server_name: Server module name (directory name under compiled_dir).
-
         Returns:
             True when skills.md is present on disk.
         """
-        return (self._compiled_dir / server_name / "skills.md").is_file()
+        return (self._compiled_dir / "mirth" / "skills.md").is_file()
 
-    def skills_path(self, server_name: str) -> Path | None:
-        """Return the Path to a server's skills.md, or None if it does not exist.
-
-        Args:
-            server_name: Server module name.
+    def skills_path(self) -> Path | None:
+        """Return the Path to skills.md, or None if it does not exist.
 
         Returns:
             Absolute Path to skills.md, or None.
         """
-        path = self._compiled_dir / server_name / "skills.md"
+        path = self._compiled_dir / "mirth" / "skills.md"
         return path if path.is_file() else None
 
-    def _get_server_manifest(self, server_name: str) -> ServerManifest:
-        """Look up a server manifest by name.
+    def _find_endpoint(self, function_name: str) -> EndpointManifest:
+        """Find an endpoint entry in the manifest.
 
         Args:
-            server_name: Server name to look up.
-
-        Returns:
-            ServerManifest.
-
-        Raises:
-            ServerNotFoundError: If server is not compiled.
-        """
-        if server_name not in self._servers:
-            available = list(self._servers.keys())
-            raise ServerNotFoundError(f"Server '{server_name}' not found. Available: {available}")
-        return self._servers[server_name]
-
-    def _find_endpoint(self, manifest: ServerManifest, server_name: str, function_name: str) -> EndpointManifest:
-        """Find an endpoint entry in a manifest.
-
-        Args:
-            manifest: Server manifest to search.
-            server_name: Name for error context.
             function_name: Function name to find.
 
         Returns:
@@ -207,37 +182,35 @@ class Registry:
         Raises:
             FunctionNotFoundError: If function not in manifest.
         """
+        if not self._manifest:
+            raise FunctionNotFoundError(f"No manifest loaded")
 
-        for ep in manifest.endpoints:
+        for ep in self._manifest.endpoints:
             if ep.function_name == function_name:
                 return ep
 
-        available = [ep.function_name for ep in manifest.endpoints]
-        raise FunctionNotFoundError(
-            f"Function '{function_name}' not found in server '{server_name}'. Available: {available}"
-        )
+        available = [ep.function_name for ep in self._manifest.endpoints]
+        raise FunctionNotFoundError(f"Function '{function_name}' not found. Available: {available}")
 
-    def _get_function_source(self, server_name: str, function_name: str) -> str:
+    def _get_function_source(self, function_name: str) -> str:
         """Extract the Python source for a function from functions.py.
 
         Args:
-            server_name: Server name.
             function_name: Function name.
 
         Returns:
             Source code of the specific function, or full file if extraction fails.
         """
-        cache_key = f"{server_name}.{function_name}"
-        if cache_key in self._function_source_cache:
-            return self._function_source_cache[cache_key]
+        if function_name in self._function_source_cache:
+            return self._function_source_cache[function_name]
 
-        functions_file = self._compiled_dir / server_name / "functions.py"
+        functions_file = self._compiled_dir / "mirth" / "functions.py"
         if not functions_file.exists():
-            return f"# Source not found for {server_name}.{function_name}"
+            return f"# Source not found for {function_name}"
 
         full_source = functions_file.read_text(encoding="utf-8")
         snippet = self._extract_function_snippet(full_source, function_name)
-        self._function_source_cache[cache_key] = snippet
+        self._function_source_cache[function_name] = snippet
         return snippet
 
     def _extract_function_snippet(self, source: str, function_name: str) -> str:

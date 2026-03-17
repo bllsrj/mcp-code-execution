@@ -102,7 +102,7 @@ class Orchestrator:
         return sources
 
     async def compile_all(self, dry_run: bool = False) -> CompileResult:
-        """Run the compile pipeline for all configured swagger sources.
+        """Run the compile pipeline for the configured swagger source.
 
         Args:
             dry_run: If True, parse and validate but do not write output.
@@ -117,19 +117,22 @@ class Orchestrator:
             logger.warning("no_swagger_sources_configured")
             return result
 
+        if len(sources) > 1:
+            logger.warning("multiple_sources_configured_using_first_only", count=len(sources))
+
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
-        for source in sources:
-            try:
-                compiled = await self._compile_source(source, dry_run=dry_run)
-                if compiled:
-                    result.compiled.append(source.name)
-                    result.total_endpoints += compiled
-                else:
-                    result.skipped.append(source.name)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("compile_failed", server=source.name, error=str(exc))
-                result.failed.append(source.name)
+        source = sources[0]  # Only use the first source
+        try:
+            compiled = await self._compile_source(source, dry_run=dry_run)
+            if compiled:
+                result.compiled.append("mirth")
+                result.total_endpoints += compiled
+            else:
+                result.skipped.append("mirth")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("compile_failed", error=str(exc))
+            result.failed.append("mirth")
 
         if not dry_run:
             self._lint_all_generated_code()
@@ -145,7 +148,7 @@ class Orchestrator:
         return result
 
     async def _compile_source(self, source: SwaggerSource, dry_run: bool) -> int:
-        """Compile a single swagger source.
+        """Compile the swagger source.
 
         Args:
             source: Swagger source configuration.
@@ -157,7 +160,7 @@ class Orchestrator:
         Raises:
             CompileError: On parsing or generation failure.
         """
-        module_name = _to_module_name(source.name)
+        module_name = "mirth"  # Hardcoded since there's only one API
         server_dir = self._output_dir / module_name
         manifest_path = server_dir / "manifest.json"
 
@@ -166,13 +169,13 @@ class Orchestrator:
         spec = await parser.parse()
 
         if dry_run:
-            logger.info("dry_run_parsed", server=source.name, endpoints=len(spec.endpoints))
+            logger.info("dry_run_parsed", endpoints=len(spec.endpoints))
             return len(spec.endpoints)
 
         # Fetch skills content independently of code-generation state
         skills_content: str | None = None
         if source.skills_url:
-            skills_content = await self._fetch_skills_content(source.skills_url, source.name)
+            skills_content = await self._fetch_skills_content(source.skills_url)
 
         # Check if code recompile is needed
         if self._is_up_to_date(manifest_path, spec.swagger_hash):
@@ -181,33 +184,33 @@ class Orchestrator:
             if skills_content is not None or source.top_level_functions:
                 server_dir.mkdir(parents=True, exist_ok=True)
             if skills_content is not None:
-                self._write_skills(server_dir, skills_content, source.name)
+                self._write_skills(server_dir, skills_content)
             if source.top_level_functions:
                 self._write_top_level_functions(server_dir, spec, module_name, source.top_level_functions)
-            logger.info("server_up_to_date", server=source.name)
+            logger.info("api_up_to_date")
             return 0
 
-        # Generate code
-        code = self._codegen.generate(spec)
+        # Generate code with default instance name (first instance in the list)
+        default_instance = source.instances[0].instance_name if source.instances else "default"
+        code = self._codegen.generate(spec, default_instance=default_instance)
 
         # Write output
         server_dir.mkdir(parents=True, exist_ok=True)
         self._write_functions(server_dir, spec, code)
-        self._write_manifest(server_dir, spec)
-        self._write_skills(server_dir, skills_content, source.name)
+        self._write_manifest(server_dir, spec, source)
+        self._write_skills(server_dir, skills_content)
         if source.top_level_functions:
             self._write_top_level_functions(server_dir, spec, module_name, source.top_level_functions)
 
-        logger.info("server_compiled", server=source.name, endpoints=len(spec.endpoints))
+        logger.info("api_compiled", endpoints=len(spec.endpoints))
         return len(spec.endpoints)
 
     @staticmethod
-    async def _fetch_skills_content(skills_url: str, server_name: str) -> str | None:
+    async def _fetch_skills_content(skills_url: str) -> str | None:
         """Fetch skills document content from a local file path or remote HTTP(S) URL.
 
         Args:
             skills_url: Local file path or HTTP/HTTPS URL.
-            server_name: Server name used for log context.
 
         Returns:
             Document content as a string, or None if the fetch failed.
@@ -218,22 +221,22 @@ class Orchestrator:
                 async with httpx.AsyncClient(timeout=30.0, verify=False, follow_redirects=True) as client:
                     response = await client.get(skills_url)
                     response.raise_for_status()
-                    logger.debug("skills_fetched_remote", server=server_name, url=skills_url)
+                    logger.debug("skills_fetched_remote", url=skills_url)
                     return response.text
             except Exception as exc:  # noqa: BLE001
-                logger.warning("skills_fetch_failed", server=server_name, url=skills_url, error=str(exc))
+                logger.warning("skills_fetch_failed", url=skills_url, error=str(exc))
                 return None
         else:
             try:
                 content = Path(skills_url).read_text(encoding="utf-8")
-                logger.debug("skills_fetched_local", server=server_name, path=skills_url)
+                logger.debug("skills_fetched_local", path=skills_url)
                 return content
             except OSError as exc:
-                logger.warning("skills_file_not_found", server=server_name, path=skills_url, error=str(exc))
+                logger.warning("skills_file_not_found", path=skills_url, error=str(exc))
                 return None
 
     @staticmethod
-    def _write_skills(server_dir: Path, content: str | None, server_name: str) -> None:
+    def _write_skills(server_dir: Path, content: str | None) -> None:
         """Write the skills document to the server output directory.
 
         If content is None (no skills_url or fetch failed), this is a no-op;
@@ -242,13 +245,12 @@ class Orchestrator:
         Args:
             server_dir: Output directory for this server.
             content: Markdown content to write, or None to skip.
-            server_name: Server name used for log context.
         """
         if content is None:
             return
         skills_path = server_dir / "skills.md"
         skills_path.write_text(content, encoding="utf-8")
-        logger.debug("skills_written", server=server_name, path=str(skills_path))
+        logger.debug("skills_written", path=str(skills_path))
 
     def _write_top_level_functions(
         self,
@@ -330,12 +332,13 @@ class Orchestrator:
         )
         logger.debug("functions_written", path=str(functions_path))
 
-    def _write_manifest(self, server_dir: Path, spec: ServerSpec) -> None:
+    def _write_manifest(self, server_dir: Path, spec: ServerSpec, source: SwaggerSource) -> None:
         """Write manifest.json with metadata for server endpoints.
 
         Args:
             server_dir: Output directory for this server.
             spec: Parsed server spec.
+            source: Original swagger source configuration with instance info.
         """
         endpoint_manifests = [
             EndpointManifest(
@@ -352,6 +355,16 @@ class Orchestrator:
             for ep in spec.endpoints
         ]
 
+        # Serialize instance information for manifest
+        instances_data = [
+            {
+                "instance_name": inst.instance_name,
+                "base_url": inst.base_url,
+                "is_read_only": inst.is_read_only,
+            }
+            for inst in source.instances
+        ]
+
         manifest = ServerManifest(
             server_name=server_dir.name,
             description=spec.description,
@@ -361,6 +374,7 @@ class Orchestrator:
             base_url=spec.base_url,
             is_read_only=spec.is_read_only,
             endpoints=endpoint_manifests,
+            instances=instances_data,
         )
 
         manifest_path = server_dir / "manifest.json"
@@ -433,23 +447,32 @@ class Orchestrator:
             "MCE_CACHE_DB_PATH": str(abs_cache_db),
         }
 
-        for src in sources:
-            env_prefix = src.name.upper()
-            env[f"MCE_{env_prefix}_BASE_URL"] = src.base_url
+        # Use first source only
+        if sources:
+            src = sources[0]
+            server_prefix = "MIRTH"  # Hardcoded since there's only one API
 
-            if src.auth_type == "jwt":
-                if src.auth_header:
-                    env[f"MCE_{env_prefix}_AUTH"] = src.auth_header
-            elif src.auth_type == "session":
-                if src.session_endpoint:
-                    env[f"MCE_{env_prefix}_SESSION_ENDPOINT"] = src.session_endpoint
+            # Server-level shared config
+            if src.auth_type == "session":
                 if src.session_cookie_name:
-                    env[f"MCE_{env_prefix}_SESSION_COOKIE_NAME"] = src.session_cookie_name
-                for key, val in src.session_credentials.items():
-                    env[f"MCE_{env_prefix}_SESSION_{key.upper()}"] = val
+                    env[f"MCE_{server_prefix}_SESSION_COOKIE_NAME"] = src.session_cookie_name
+                if src.session_endpoint:
+                    env[f"MCE_{server_prefix}_SESSION_ENDPOINT"] = src.session_endpoint
 
             if src.extra_headers:
-                env[f"MCE_{env_prefix}_EXTRA_HEADERS"] = json.dumps(src.extra_headers)
+                env[f"MCE_{server_prefix}_EXTRA_HEADERS"] = json.dumps(src.extra_headers)
+
+            # Instance-specific config
+            for instance in src.instances:
+                instance_prefix = f"{server_prefix}_{instance.instance_name.upper()}"
+                env[f"MCE_{instance_prefix}_BASE_URL"] = instance.base_url
+
+                if src.auth_type == "session":
+                    for key, val in instance.session_credentials.items():
+                        env[f"MCE_{instance_prefix}_SESSION_{key.upper()}"] = val
+
+                if instance.is_read_only:
+                    env[f"MCE_{instance_prefix}_IS_READ_ONLY"] = "true"
 
         mcp_config = {
             "mcpServers": {

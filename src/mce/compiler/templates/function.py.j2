@@ -12,29 +12,86 @@ from typing import Any{% if functions | selectattr("typeddict_classes") | list %
 
 import httpx
 
-_BASE_URL: str = os.environ["MCE_{{ server_name | upper }}_BASE_URL"]
+# Instance configuration - loaded from environment variables
+_INSTANCES: dict[str, dict[str, Any]] = {}
+_SESSION_COOKIES: dict[str, str | None] = {}  # Per-instance session cookies
+_DEFAULT_INSTANCE: str = "{{ default_instance }}"
+
+{% if auth_type == "session" %}
+_SESSION_COOKIE_NAME: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_COOKIE_NAME", "")
+_SESSION_ENDPOINT: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_ENDPOINT", "")
+{% endif %}
 _EXTRA_HEADERS: dict[str, str] = json.loads(os.environ.get("MCE_{{ server_name | upper }}_EXTRA_HEADERS", "{}"))
 
-{% if auth_type == "jwt" %}
-_AUTH_HEADER: str = os.environ.get("MCE_{{ server_name | upper }}_AUTH", "")
-{% elif auth_type == "session" %}
-_SESSION_ENDPOINT: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_ENDPOINT", "")
-_SESSION_USERNAME: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_USERNAME", "")
-_SESSION_PASSWORD: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_PASSWORD", "")
-_SESSION_COOKIE_NAME: str = os.environ.get("MCE_{{ server_name | upper }}_SESSION_COOKIE_NAME", "")
-_SESSION_COOKIE: str | None = None  # Cache during execution
+
+def _load_instances() -> None:
+    """Load instance configurations from environment variables."""
+    global _INSTANCES, _DEFAULT_INSTANCE
+
+    # Discover all instances by scanning for MCE_{SERVER}_{INSTANCE}_BASE_URL env vars
+    prefix = "MCE_{{ server_name | upper }}_"
+    for key in os.environ:
+        if key.startswith(prefix) and key.endswith("_BASE_URL"):
+            # Extract instance name: MCE_MIRTH_PROD_BASE_URL -> PROD
+            instance_name = key[len(prefix):-len("_BASE_URL")].lower()
+
+            _INSTANCES[instance_name] = {
+                "base_url": os.environ[key],
+                {% if auth_type == "session" %}
+                "session_username": os.environ.get(f"MCE_{{ server_name | upper }}_{instance_name.upper()}_SESSION_USERNAME", ""),
+                "session_password": os.environ.get(f"MCE_{{ server_name | upper }}_{instance_name.upper()}_SESSION_PASSWORD", ""),
+                {% elif auth_type == "jwt" %}
+                "auth_header": os.environ.get(f"MCE_{{ server_name | upper }}_{instance_name.upper()}_AUTH", ""),
+                {% endif %}
+                "is_read_only": os.environ.get(f"MCE_{{ server_name | upper }}_{instance_name.upper()}_IS_READ_ONLY", "false").lower() == "true",
+            }
+
+            {% if auth_type == "session" %}
+            _SESSION_COOKIES[instance_name] = None
+            {% endif %}
+
+    # Set default instance if not already set
+    if _INSTANCES and _DEFAULT_INSTANCE not in _INSTANCES:
+        _DEFAULT_INSTANCE = next(iter(_INSTANCES.keys()))
 
 
-def _authenticate_session() -> str | None:
-    """Authenticate to session endpoint and extract cookie."""
-    global _SESSION_COOKIE
-    if _SESSION_COOKIE:
-        return _SESSION_COOKIE
+# Load instances at module import time
+_load_instances()
+
+
+def _get_instance_config(instance: str) -> dict[str, Any]:
+    """Get configuration for specified instance."""
+    if instance not in _INSTANCES:
+        available = ", ".join(_INSTANCES.keys())
+        raise ValueError(
+            f"Unknown instance '{instance}' for server '{{ server_name }}'. "
+            f"Available instances: {available}"
+        )
+    return _INSTANCES[instance]
+
+
+{% if auth_type == "session" %}
+def _authenticate_session(instance: str, force: bool = False) -> str | None:
+    """Authenticate to session endpoint and extract cookie for specified instance.
+
+    Args:
+        instance: Instance name to authenticate.
+        force: If True, force re-authentication even if cached cookie exists.
+    """
+    global _SESSION_COOKIES
+
+    if not force and _SESSION_COOKIES.get(instance):
+        return _SESSION_COOKIES[instance]
+
+    config = _get_instance_config(instance)
+
+    # Construct full session URL: base_url + session_endpoint
+    session_url = f"{config['base_url']}{_SESSION_ENDPOINT}"
 
     try:
         r = httpx.post(
-            _SESSION_ENDPOINT,
-            json={"username": _SESSION_USERNAME, "password": _SESSION_PASSWORD},
+            session_url,
+            json={"username": config["session_username"], "password": config["session_password"]},
             timeout=15.0,
             verify=False,
         )
@@ -42,23 +99,25 @@ def _authenticate_session() -> str | None:
 
         # Extract cookie from response
         if _SESSION_COOKIE_NAME in r.cookies:
-            _SESSION_COOKIE = r.cookies[_SESSION_COOKIE_NAME]
-            return _SESSION_COOKIE
+            _SESSION_COOKIES[instance] = r.cookies[_SESSION_COOKIE_NAME]
+            return _SESSION_COOKIES[instance]
     except Exception:
         pass
     return None
 {% endif %}
 
 
-def _headers() -> dict[str, str]:
-    """Build request headers, injecting auth and custom headers if configured."""
-    h: dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json"}
+def _headers(instance: str) -> dict[str, str]:
+    """Build request headers for specified instance, injecting auth and custom headers if configured."""
+    h: dict[str, str] = {"Content-Type": "application/json", "Accept": "application/xml"}
+
+    config = _get_instance_config(instance)
 
     {% if auth_type == "jwt" %}
-    if _AUTH_HEADER:
-        h["Authorization"] = _AUTH_HEADER
+    if config.get("auth_header"):
+        h["Authorization"] = config["auth_header"]
     {% elif auth_type == "session" %}
-    cookie = _authenticate_session()
+    cookie = _authenticate_session(instance)
     if cookie:
         h["Cookie"] = f"{_SESSION_COOKIE_NAME}={cookie}"
     {% endif %}
@@ -70,16 +129,18 @@ def _headers() -> dict[str, str]:
 def _request(
     method: str,
     path: str,
+    instance: str,
     base_url: str | None = None,
     params: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
 ) -> Any:
-    """Execute an HTTP request against the {{ server_name }} API.
+    """Execute an HTTP request against the {{ server_name }} API for specified instance.
 
     Args:
         method: HTTP method (GET, POST, etc.).
         path: URL path to append to base URL.
-        base_url: Per-endpoint base URL override; falls back to module _BASE_URL.
+        instance: Instance name to use for this request.
+        base_url: Per-endpoint base URL override; falls back to instance base_url.
         params: Optional query parameters.
         json_body: Optional JSON request body.
 
@@ -88,8 +149,18 @@ def _request(
 
     Raises:
         httpx.HTTPStatusError: On 4xx/5xx responses.
+        RuntimeError: If attempting a write operation on a read-only instance.
     """
-    url = f"{base_url or _BASE_URL}{path}"
+    config = _get_instance_config(instance)
+
+    # Enforce read-only restriction for non-GET operations
+    if config.get("is_read_only", False) and method.upper() != "GET":
+        raise RuntimeError(
+            f"Cannot perform {method} operation on read-only instance '{instance}'. "
+            f"This instance is configured as read-only to prevent accidental modifications."
+        )
+
+    url = f"{base_url or config['base_url']}{path}"
     filtered = {k: v for k, v in (params or {}).items() if v is not None}
     if filtered:
         # List params need literal commas (not %2C), so build query string manually.
@@ -101,19 +172,42 @@ def _request(
                 encoded_val = ",".join(urllib.parse.quote(str(i), safe="") for i in v)
                 qs = f"{qs}&{encoded_key}={encoded_val}" if qs else f"{encoded_key}={encoded_val}"
         url = f"{url}?{qs}"
+
+    # Make request with automatic retry on 401 (session expired)
     r = httpx.request(
         method,
         url,
-        headers=_headers(),
+        headers=_headers(instance),
         json=json_body,
         timeout=15.0,
         verify=False,
     )
+
+    {% if auth_type == "session" %}
+    # If 401 Unauthorized, try to re-authenticate and retry once
+    if r.status_code == 401:
+        _authenticate_session(instance, force=True)  # Force fresh authentication
+        r = httpx.request(
+            method,
+            url,
+            headers=_headers(instance),  # Get new headers with fresh cookie
+            json=json_body,
+            timeout=15.0,
+            verify=False,
+        )
+    {% endif %}
+
     r.raise_for_status()
+
+    # Try XML first (preferred for Mirth), fall back to JSON, then raw text
     try:
-        return r.json()
+        import xmltodict
+        return xmltodict.parse(r.text)
     except Exception:
-        return r.text
+        try:
+            return r.json()
+        except Exception:
+            return r.text
 
 
 # --- Response Types ---
@@ -127,12 +221,14 @@ def _request(
 # --- API Functions ---
 
 {% for fn in functions %}
-{% if ("def " + fn.name + "(" + fn.signature + ") -> " + fn.return_type + ":") | length > 120 %}
+{% if ("def " + fn.name + "(instance: str = _DEFAULT_INSTANCE, " + fn.signature + ") -> " + fn.return_type + ":") | length > 120 %}
 def {{ fn.name }}(
     {{ fn.params | join(",\n    ") }},
+    *,
+    instance: str = _DEFAULT_INSTANCE,
 ) -> {{ fn.return_type }}:
 {% else %}
-def {{ fn.name }}({{ fn.signature }}) -> {{ fn.return_type }}:
+def {{ fn.name }}({% if fn.signature %}{{ fn.signature }}, *, {% endif %}instance: str = _DEFAULT_INSTANCE) -> {{ fn.return_type }}:
 {% endif %}
     """{{ fn.summary }}
 
@@ -141,6 +237,7 @@ def {{ fn.name }}({{ fn.signature }}) -> {{ fn.return_type }}:
 
     {% endif %}
     Args:
+        instance: Server instance to use (e.g., "prod", "staging"). Defaults to first configured instance.
         {% for arg in fn.docstring_args %}
         {{ arg.name }}: {{ arg.description }}{% if arg.required %} (required){% else %} (optional){% endif %}
 
@@ -158,6 +255,7 @@ def {{ fn.name }}({{ fn.signature }}) -> {{ fn.return_type }}:
     return _request(
         "{{ fn.method }}",
         {{ fn.path_expr }},
+        instance,
         {% if fn.base_url %}
         base_url="{{ fn.base_url }}",
         {% endif %}

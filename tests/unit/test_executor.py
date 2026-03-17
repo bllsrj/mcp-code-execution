@@ -14,7 +14,7 @@ import pytest
 
 from mce.config import MCEConfig
 from mce.errors import ExecutionError, ExecutionTimeoutError, LintError, SecurityViolationError
-from mce.runtime.executor import CodeExecutor, _detect_servers_used
+from mce.runtime.executor import CodeExecutor
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,37 +39,6 @@ def _make_mock_cache() -> AsyncMock:
     cache = AsyncMock()
     cache.store = AsyncMock(return_value="fake-cache-id-abc123")
     return cache
-
-
-# ---------------------------------------------------------------------------
-# _detect_servers_used
-# ---------------------------------------------------------------------------
-
-
-def test_detect_servers_used_from_import() -> None:
-    code = "from weather.functions import get_current_weather"
-    assert _detect_servers_used(code) == ["weather"]
-
-
-def test_detect_servers_used_import_style() -> None:
-    code = "import hotel.functions"
-    assert _detect_servers_used(code) == ["hotel"]
-
-
-def test_detect_servers_used_multiple_servers() -> None:
-    code = "from weather.functions import fn\nfrom hotel.functions import book"
-    servers = _detect_servers_used(code)
-    assert sorted(servers) == ["hotel", "weather"]
-
-
-def test_detect_servers_used_no_server_imports() -> None:
-    code = "import os\nimport json\nresult = 42"
-    assert _detect_servers_used(code) == []
-
-
-def test_detect_servers_used_deduplicates() -> None:
-    code = "from weather.functions import fn1\nfrom weather.functions import fn2"
-    assert _detect_servers_used(code) == ["weather"]
 
 
 # ---------------------------------------------------------------------------

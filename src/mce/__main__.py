@@ -198,10 +198,11 @@ async def _cmd_serve(config_args: argparse.Namespace) -> int:
     registry = Registry(config.compiled_output_dir)
     registry.load()
 
-    servers = registry.list_servers()
+    # Check if we have functions loaded
+    has_functions = len(registry.list_function_names()) > 0
     logger.info(
         "mce_starting",
-        servers=[s.name for s in servers],
+        has_functions=has_functions,
         transport=getattr(config_args, "transport", "stdio"),
         host=config.host,
         port=config.port,

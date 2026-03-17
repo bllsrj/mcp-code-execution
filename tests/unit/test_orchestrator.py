@@ -191,12 +191,12 @@ def test_write_functions_creates_files(tmp_path: Path, sample_server_spec) -> No
     assert (server_dir / "__init__.py").exists()
 
 
-def test_write_manifest_creates_manifest_json(tmp_path: Path, sample_server_spec) -> None:  # type: ignore[no-untyped-def]
+def test_write_manifest_creates_manifest_json(tmp_path: Path, sample_server_spec, sample_swagger_source) -> None:  # type: ignore[no-untyped-def]
     config = _make_config(tmp_path)
     orchestrator = Orchestrator(config)
     server_dir = tmp_path / "weather"
     server_dir.mkdir()
-    orchestrator._write_manifest(server_dir, sample_server_spec)
+    orchestrator._write_manifest(server_dir, sample_server_spec, sample_swagger_source)
     manifest_path = server_dir / "manifest.json"
     assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text())
@@ -204,12 +204,12 @@ def test_write_manifest_creates_manifest_json(tmp_path: Path, sample_server_spec
     assert manifest["swagger_hash"] == sample_server_spec.swagger_hash
 
 
-def test_write_manifest_contains_endpoints(tmp_path: Path, sample_server_spec) -> None:  # type: ignore[no-untyped-def]
+def test_write_manifest_contains_endpoints(tmp_path: Path, sample_server_spec, sample_swagger_source) -> None:  # type: ignore[no-untyped-def]
     config = _make_config(tmp_path)
     orchestrator = Orchestrator(config)
     server_dir = tmp_path / "weather"
     server_dir.mkdir()
-    orchestrator._write_manifest(server_dir, sample_server_spec)
+    orchestrator._write_manifest(server_dir, sample_server_spec, sample_swagger_source)
     manifest = json.loads((server_dir / "manifest.json").read_text())
     endpoints = manifest["endpoints"]
     assert len(endpoints) == 1
@@ -369,7 +369,7 @@ async def test_compile_all_records_failed_source(tmp_path: Path) -> None:
 
 
 def test_generate_mcp_json_jwt_auth(tmp_path: Path) -> None:
-    """JWT auth sources set MCE_{SERVER}_AUTH env var."""
+    """JWT auth sources set MCE_{SERVER}_{INSTANCE}_AUTH env var (instance-aware)."""
     servers = [
         {
             "name": "weather",
@@ -395,12 +395,14 @@ def test_generate_mcp_json_jwt_auth(tmp_path: Path) -> None:
     mcp_config = json.loads(mcp_json_str)
 
     env = mcp_config["mcpServers"]["mcp-code-execution"]["env"]
-    assert "MCE_WEATHER_AUTH" in env
-    assert env["MCE_WEATHER_AUTH"] == "${WEATHER_API_KEY}"
+    # Default instance name equals server name when no instances specified
+    assert "MCE_WEATHER_WEATHER_BASE_URL" in env
+    assert "MCE_WEATHER_WEATHER_AUTH" in env
+    assert env["MCE_WEATHER_WEATHER_AUTH"] == "${WEATHER_API_KEY}"
 
 
 def test_generate_mcp_json_session_auth(tmp_path: Path) -> None:
-    """Session auth sources set MCE_{SERVER}_SESSION_* env vars."""
+    """Session auth sources set MCE_{SERVER}_SESSION_* env vars (instance-aware)."""
     servers = [
         {
             "name": "myapp",
@@ -428,14 +430,17 @@ def test_generate_mcp_json_session_auth(tmp_path: Path) -> None:
     mcp_config = json.loads(mcp_json_str)
 
     env = mcp_config["mcpServers"]["mcp-code-execution"]["env"]
-    assert "MCE_MYAPP_SESSION_ENDPOINT" in env
-    assert env["MCE_MYAPP_SESSION_ENDPOINT"] == "https://api.myapp.example.com/login"
+    # Session auth: shared server-level config
     assert "MCE_MYAPP_SESSION_COOKIE_NAME" in env
     assert env["MCE_MYAPP_SESSION_COOKIE_NAME"] == "JSESSIONID"
-    assert "MCE_MYAPP_SESSION_USERNAME" in env
-    assert env["MCE_MYAPP_SESSION_USERNAME"] == "${MYAPP_USERNAME}"
-    assert "MCE_MYAPP_SESSION_PASSWORD" in env
-    assert env["MCE_MYAPP_SESSION_PASSWORD"] == "${MYAPP_PASSWORD}"
+    assert "MCE_MYAPP_SESSION_ENDPOINT" in env
+    assert env["MCE_MYAPP_SESSION_ENDPOINT"] == "https://api.myapp.example.com/login"
+    # Instance-specific session credentials (default instance = server name)
+    assert "MCE_MYAPP_MYAPP_BASE_URL" in env
+    assert "MCE_MYAPP_MYAPP_SESSION_USERNAME" in env
+    assert env["MCE_MYAPP_MYAPP_SESSION_USERNAME"] == "${MYAPP_USERNAME}"
+    assert "MCE_MYAPP_MYAPP_SESSION_PASSWORD" in env
+    assert env["MCE_MYAPP_MYAPP_SESSION_PASSWORD"] == "${MYAPP_PASSWORD}"
 
 
 # ---------------------------------------------------------------------------

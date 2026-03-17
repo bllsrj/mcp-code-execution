@@ -19,25 +19,25 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Pattern to detect server function imports in user code
-_SERVER_IMPORT_RE = re.compile(r"from\s+(\w+)\.functions\s+import|import\s+(\w+)\.functions")
+# Pattern to detect instance parameters in function calls
+_INSTANCE_PARAM_RE = re.compile(r'instance\s*=\s*["\'](\w+)["\']')
 
 
-def _detect_servers_used(code: str) -> list[str]:
-    """Detect which server function modules are imported in the code.
+def _detect_instances_used(code: str) -> list[str]:
+    """Detect which instances are used in function calls.
 
     Args:
         code: Python source code.
 
     Returns:
-        List of server names referenced by from <name>.functions import.
+        List of instance names found in instance="name" parameters.
     """
-    servers: set[str] = set()
-    for match in _SERVER_IMPORT_RE.finditer(code):
-        name = match.group(1) or match.group(2)
+    instances: set[str] = set()
+    for match in _INSTANCE_PARAM_RE.finditer(code):
+        name = match.group(1)
         if name:
-            servers.add(name)
-    return sorted(servers)
+            instances.add(name)
+    return sorted(instances)
 
 
 def _human_readable_time(timestamp: float) -> str:
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS reusable_functions (
     name TEXT PRIMARY KEY,
     description TEXT NOT NULL,
     code TEXT NOT NULL,
-    servers_used TEXT NOT NULL,
+    instances_used TEXT NOT NULL,
     times_used INTEGER DEFAULT 1,
     created_at REAL NOT NULL,
     last_used_at REAL NOT NULL
@@ -165,8 +165,8 @@ class CacheStore:
             if not is_valid:
                 raise CompileError(f"Code validation failed: {error}")
 
-        # Auto-detect servers
-        servers_used = _detect_servers_used(code)
+        # Auto-detect instances
+        instances_used = _detect_instances_used(code)
 
         # Check capacity and prune if needed
         await self._enforce_global_cap_if_needed()
@@ -178,18 +178,18 @@ class CacheStore:
                 await db.execute(
                     """
                     INSERT INTO reusable_functions
-                        (name, description, code, servers_used, times_used, created_at, last_used_at)
+                        (name, description, code, instances_used, times_used, created_at, last_used_at)
                     VALUES (?, ?, ?, ?, 1, ?, ?)
                     """,
-                    (name, description, code, json.dumps(servers_used), now, now),
+                    (name, description, code, json.dumps(instances_used), now, now),
                 )
                 await db.commit()
-            logger.info("function_saved", name=name, servers=servers_used)
+            logger.info("function_saved", name=name, instances=instances_used)
             return ReusableFunction(
                 name=name,
                 description=description,
                 code=code,
-                servers_used=servers_used,
+                instances_used=instances_used,
                 times_used=1,
                 created_at=now,
                 last_used_at=now,
@@ -231,8 +231,8 @@ class CacheStore:
             if not is_valid:
                 raise CompileError(f"Code validation failed: {error}")
 
-        # Auto-detect servers
-        servers_used = _detect_servers_used(code)
+        # Auto-detect instances
+        instances_used = _detect_instances_used(code)
 
         # Log reason
         logger.info("function_overwritten", name=name, reason=reason)
@@ -244,18 +244,18 @@ class CacheStore:
                 await db.execute(
                     """
                     UPDATE reusable_functions
-                    SET description = ?, code = ?, servers_used = ?, times_used = 1,
+                    SET description = ?, code = ?, instances_used = ?, times_used = 1,
                         created_at = ?, last_used_at = ?
                     WHERE name = ?
                     """,
-                    (description, code, json.dumps(servers_used), now, now, name),
+                    (description, code, json.dumps(instances_used), now, now, name),
                 )
                 await db.commit()
             return ReusableFunction(
                 name=name,
                 description=description,
                 code=code,
-                servers_used=servers_used,
+                instances_used=instances_used,
                 times_used=1,
                 created_at=now,
                 last_used_at=now,
@@ -285,7 +285,7 @@ class CacheStore:
                         name=row["name"],
                         description=row["description"],
                         code=row["code"],
-                        servers_used=json.loads(row["servers_used"]),
+                        instances_used=json.loads(row["instances_used"]),
                         times_used=row["times_used"],
                         created_at=row["created_at"],
                         last_used_at=row["last_used_at"],
@@ -295,25 +295,25 @@ class CacheStore:
             return None
 
     async def list_reusable_functions(
-        self, server_filter: list[str] | None = None
+        self, instance_filter: list[str] | None = None
     ) -> list[dict[str, Any]]:
-        """List all functions, optionally filtered by server(s).
+        """List all functions, optionally filtered by instance(s).
 
         Args:
-            server_filter: Optional list of server names to filter by.
+            instance_filter: Optional list of instance names to filter by.
 
         Returns:
             List of dicts with function metadata, sorted by times_used DESC.
-            If single server filter: omit 'servers_used' field from response.
-            Otherwise: include 'servers_used' field.
+            If single instance filter: omit 'instances_used' field from response.
+            Otherwise: include 'instances_used' field.
         """
         try:
             async with aiosqlite.connect(self._db_path) as db:
                 db.row_factory = aiosqlite.Row
 
                 # Build query
-                if server_filter:
-                    # Filter functions that use any of the specified servers
+                if instance_filter:
+                    # Filter functions that use any of the specified instances
                     query = """
                     SELECT * FROM reusable_functions
                     ORDER BY times_used DESC
@@ -323,8 +323,8 @@ class CacheStore:
                         # Filter in Python (SQLite JSON querying is complex)
                         results = []
                         for row in rows:
-                            servers = json.loads(row["servers_used"])
-                            if any(s in server_filter for s in servers):
+                            instances = json.loads(row["instances_used"])
+                            if any(i in instance_filter for i in instances):
                                 results.append(row)
                 else:
                     query = "SELECT * FROM reusable_functions ORDER BY times_used DESC"
@@ -332,7 +332,7 @@ class CacheStore:
                         results = list(await cursor.fetchall())
 
                 # Format response
-                include_servers = not server_filter or len(server_filter) != 1
+                include_instances = not instance_filter or len(instance_filter) != 1
                 output = []
                 for row in results:
                     item: dict[str, Any] = {
@@ -341,8 +341,8 @@ class CacheStore:
                         "times_used": row["times_used"],
                         "last_used": _human_readable_time(row["last_used_at"]),
                     }
-                    if include_servers:
-                        item["servers_used"] = json.loads(row["servers_used"])
+                    if include_instances:
+                        item["instances_used"] = json.loads(row["instances_used"])
                     output.append(item)
                 return output
         except aiosqlite.Error as exc:
@@ -350,29 +350,29 @@ class CacheStore:
             return []
 
     async def increment_usage(self, name: str, code: str) -> None:
-        """Increment times_used, update last_used_at, and refresh servers_used.
+        """Increment times_used, update last_used_at, and refresh instances_used.
 
         Args:
             name: Function name.
-            code: Function code (to re-detect servers).
+            code: Function code (to re-detect instances).
         """
-        # Detect current servers
-        new_servers = _detect_servers_used(code)
+        # Detect current instances
+        new_instances = _detect_instances_used(code)
 
         try:
             async with aiosqlite.connect(self._db_path) as db:
-                # Fetch existing servers
+                # Fetch existing instances
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT servers_used FROM reusable_functions WHERE name = ?", (name,)
+                    "SELECT instances_used FROM reusable_functions WHERE name = ?", (name,)
                 ) as cursor:
                     row = await cursor.fetchone()
                     if not row:
                         return
-                    existing_servers = json.loads(row["servers_used"])
+                    existing_instances = json.loads(row["instances_used"])
 
-                # Merge servers
-                updated_servers = sorted(set(existing_servers) | set(new_servers))
+                # Merge instances
+                updated_instances = sorted(set(existing_instances) | set(new_instances))
 
                 # Update
                 await db.execute(
@@ -380,15 +380,15 @@ class CacheStore:
                     UPDATE reusable_functions
                     SET times_used = times_used + 1,
                         last_used_at = ?,
-                        servers_used = ?
+                        instances_used = ?
                     WHERE name = ?
                     """,
-                    (time.time(), json.dumps(updated_servers), name),
+                    (time.time(), json.dumps(updated_instances), name),
                 )
                 await db.commit()
 
-                if updated_servers != existing_servers:
-                    logger.info("function_servers_updated", name=name, servers=updated_servers)
+                if updated_instances != existing_instances:
+                    logger.info("function_instances_updated", name=name, instances=updated_instances)
         except aiosqlite.Error as exc:
             logger.error("increment_usage_failed", name=name, error=str(exc))
 

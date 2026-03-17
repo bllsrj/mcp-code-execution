@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mce.errors import CompileError
-from mce.runtime.cache import CacheStore, _detect_servers_used, _human_readable_time
+from mce.runtime.cache import CacheStore, _detect_instances_used, _human_readable_time
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,32 +36,32 @@ async def cache(tmp_path: Path) -> CacheStore:
 # ---------------------------------------------------------------------------
 
 
-def test_detect_servers_used_single_import() -> None:
-    """Detect single server from import statement."""
-    code = "from mirth.functions import get_channels\nresult = get_channels()"
-    assert _detect_servers_used(code) == ["mirth"]
+def test_detect_instances_used_single_instance() -> None:
+    """Detect single instance from function call."""
+    code = 'from mirth.functions import get_channels\nresult = get_channels(instance="prod")'
+    assert _detect_instances_used(code) == ["prod"]
 
 
-def test_detect_servers_used_multiple_imports() -> None:
-    """Detect multiple servers from different imports."""
-    code = """
+def test_detect_instances_used_multiple_instances() -> None:
+    """Detect multiple instances from different calls."""
+    code = '''
 from mirth.functions import get_channels
-from weather.functions import get_forecast
-result = get_channels() + get_forecast()
-"""
-    assert _detect_servers_used(code) == ["mirth", "weather"]
+result = get_channels(instance="prod")
+result2 = get_channels(instance="staging")
+'''
+    assert _detect_instances_used(code) == ["prod", "staging"]
 
 
-def test_detect_servers_used_import_module_style() -> None:
-    """Detect servers from 'import server.functions' style."""
-    code = "import mirth.functions\nresult = mirth.functions.get_channels()"
-    assert _detect_servers_used(code) == ["mirth"]
+def test_detect_instances_used_single_quotes() -> None:
+    """Detect instances with single quotes."""
+    code = "from mirth.functions import get_channels\nresult = get_channels(instance='prod')"
+    assert _detect_instances_used(code) == ["prod"]
 
 
-def test_detect_servers_used_no_imports() -> None:
-    """No servers detected when no imports present."""
+def test_detect_instances_used_no_instances() -> None:
+    """No instances detected when no instance parameters present."""
     code = "result = 42"
-    assert _detect_servers_used(code) == []
+    assert _detect_instances_used(code) == []
 
 
 def test_human_readable_time_just_now() -> None:
@@ -95,7 +95,7 @@ def test_human_readable_time_days() -> None:
 
 async def test_save_reusable_function(cache: CacheStore) -> None:
     """Save new function successfully."""
-    code = "from mirth.functions import get_channels\nresult = get_channels()"
+    code = 'from mirth.functions import get_channels\nresult = get_channels(instance="prod")'
     func = await cache.save_reusable_function(
         name="list_all_channels",
         description="List all Mirth channels",
@@ -105,7 +105,7 @@ async def test_save_reusable_function(cache: CacheStore) -> None:
     assert func.name == "list_all_channels"
     assert func.description == "List all Mirth channels"
     assert func.code == code
-    assert func.servers_used == ["mirth"]
+    assert func.instances_used == ["prod"]
     assert func.times_used == 1
 
 
@@ -180,33 +180,33 @@ async def test_list_reusable_functions(cache: CacheStore) -> None:
 
 
 async def test_list_reusable_functions_with_filter(cache: CacheStore) -> None:
-    """List functions filtered by server."""
-    await cache.save_reusable_function("m1", "mirth 1", "from mirth.functions import x")
-    await cache.save_reusable_function("w1", "weather 1", "from weather.functions import y")
-    await cache.save_reusable_function("m2", "mirth 2", "from mirth.functions import z")
+    """List functions filtered by instance."""
+    await cache.save_reusable_function("m1", "prod func", 'from mirth.functions import x\nx(instance="prod")')
+    await cache.save_reusable_function("w1", "staging func", 'from mirth.functions import y\ny(instance="staging")')
+    await cache.save_reusable_function("m2", "prod func 2", 'from mirth.functions import z\nz(instance="prod")')
 
-    functions = await cache.list_reusable_functions(server_filter=["mirth"])
+    functions = await cache.list_reusable_functions(instance_filter=["prod"])
     assert len(functions) == 2
     names = {f["name"] for f in functions}
     assert names == {"m1", "m2"}
 
 
-async def test_list_single_server_filter_omits_servers_used(cache: CacheStore) -> None:
-    """Single server filter omits servers_used field."""
-    await cache.save_reusable_function("func", "test", "from mirth.functions import x")
+async def test_list_single_instance_filter_omits_instances_used(cache: CacheStore) -> None:
+    """Single instance filter omits instances_used field."""
+    await cache.save_reusable_function("func", "test", 'from mirth.functions import x\nx(instance="prod")')
 
-    functions = await cache.list_reusable_functions(server_filter=["mirth"])
+    functions = await cache.list_reusable_functions(instance_filter=["prod"])
     assert len(functions) == 1
-    assert "servers_used" not in functions[0]
+    assert "instances_used" not in functions[0]
 
 
-async def test_list_multiple_server_filter_includes_servers_used(cache: CacheStore) -> None:
-    """Multiple server filter includes servers_used field."""
-    await cache.save_reusable_function("func", "test", "from mirth.functions import x")
+async def test_list_multiple_instance_filter_includes_instances_used(cache: CacheStore) -> None:
+    """Multiple instance filter includes instances_used field."""
+    await cache.save_reusable_function("func", "test", 'from mirth.functions import x\nx(instance="prod")')
 
-    functions = await cache.list_reusable_functions(server_filter=["mirth", "weather"])
+    functions = await cache.list_reusable_functions(instance_filter=["prod", "staging"])
     assert len(functions) == 1
-    assert "servers_used" in functions[0]
+    assert "instances_used" in functions[0]
 
 
 async def test_increment_usage(cache: CacheStore) -> None:
@@ -221,17 +221,17 @@ async def test_increment_usage(cache: CacheStore) -> None:
     assert func.times_used == 2
 
 
-async def test_increment_usage_merges_servers(cache: CacheStore) -> None:
-    """Increment usage merges new servers with existing."""
-    code1 = "from mirth.functions import x"
+async def test_increment_usage_merges_instances(cache: CacheStore) -> None:
+    """Increment usage merges new instances with existing."""
+    code1 = 'from mirth.functions import x\nx(instance="prod")'
     await cache.save_reusable_function("func", "test", code1)
 
-    code2 = "from mirth.functions import x\nfrom weather.functions import y"
+    code2 = 'from mirth.functions import x\nx(instance="prod")\nx(instance="staging")'
     await cache.increment_usage("func", code2)
 
     func = await cache.get_reusable_function("func")
     assert func is not None
-    assert set(func.servers_used) == {"mirth", "weather"}
+    assert set(func.instances_used) == {"prod", "staging"}
 
 
 async def test_delete_reusable_function(cache: CacheStore) -> None:

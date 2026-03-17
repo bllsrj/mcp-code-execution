@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import subprocess
 import time
 from pathlib import Path
@@ -20,28 +19,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Pattern to detect server function imports in user code
-_SERVER_IMPORT_RE = re.compile(r"from\s+(\w+)\.functions\s+import|import\s+(\w+)\.functions")
-
 # Maximum bytes of container output to read
 _MAX_OUTPUT_BYTES = 1_048_576  # 1MB
-
-
-def _detect_servers_used(code: str) -> list[str]:
-    """Detect which server function modules are imported in the code.
-
-    Args:
-        code: Python source code.
-
-    Returns:
-        List of server names referenced by from <name>.functions import.
-    """
-    servers: set[str] = set()
-    for match in _SERVER_IMPORT_RE.finditer(code):
-        name = match.group(1) or match.group(2)
-        if name:
-            servers.add(name)
-    return sorted(servers)
 
 
 class CodeExecutor:
@@ -90,14 +69,11 @@ class CodeExecutor:
         if self._config.lint_enabled:
             self._lint_code(code)
 
-        # Detect which servers are used for credential injection
-        servers_used = _detect_servers_used(code)
-
         # Build complete execution code with compiled dir in sys.path
-        execution_code = self._build_execution_code(code, servers_used)
+        execution_code = self._build_execution_code(code)
 
         # Run in Docker sandbox
-        raw_output = self._run_in_docker(execution_code, servers_used)
+        raw_output = self._run_in_docker(execution_code)
 
         elapsed_ms = int(time.time() * 1000) - start_ms
 
@@ -108,7 +84,6 @@ class CodeExecutor:
             "code_executed",
             success=result.success,
             elapsed_ms=elapsed_ms,
-            servers=servers_used,
             description=description[:60],
         )
 
@@ -176,12 +151,11 @@ class CodeExecutor:
     # Container-side mount point for the compiled server functions
     _CONTAINER_COMPILED_PATH = "/mce_compiled"
 
-    def _build_execution_code(self, user_code: str, servers_used: list[str]) -> str:
+    def _build_execution_code(self, user_code: str) -> str:
         """Build complete execution payload with sys.path injection.
 
         Args:
             user_code: User-provided Python code.
-            servers_used: Server names detected in imports.
 
         Returns:
             Complete Python code ready for execution in sandbox.
@@ -192,12 +166,11 @@ _sys.path.insert(0, {self._CONTAINER_COMPILED_PATH!r})
 """
         return f"{path_injection}\n{user_code}"
 
-    def _run_in_docker(self, code: str, servers_used: list[str]) -> str:
+    def _run_in_docker(self, code: str) -> str:
         """Execute code in an isolated Docker container via CLI stdin pipe.
 
         Args:
             code: Complete Python code to execute.
-            servers_used: Server names for credential injection.
 
         Returns:
             Raw stdout output from the container.
@@ -206,7 +179,8 @@ _sys.path.insert(0, {self._CONTAINER_COMPILED_PATH!r})
             ExecutionTimeoutError: If execution exceeds configured timeout.
             ExecutionError: On Docker errors or non-zero exit code.
         """
-        env_vars = build_all_server_env_vars(servers_used)
+        # Always pass mirth credentials (all instances)
+        env_vars = build_all_server_env_vars(["mirth"])
         logger.debug("docker_execute_start", image=self._config.docker_image)
 
         cmd = ["docker"]

@@ -1,25 +1,30 @@
 servers:
-  - name: weather
-    swagger_url: "https://api.weather.example.com/v1/openapi.json"
-    base_url: "https://api.weather.example.com/v1"
-    auth_type: "jwt"              # "jwt" (default) or "session"
-    auth_header: "${WEATHER_API_KEY}"
-    is_read_only: true
-
-  - name: hotel_booking
-    swagger_url: "./swaggers/hotel.yaml"
-    base_url: "https://api.hotel.example.com/v2"
-    auth_type: "jwt"
-    auth_header: "Bearer ${HOTEL_API_TOKEN}"
-    is_read_only: false
-
-  - name: my_app                  # Example with session authentication
-    swagger_url: "https://api.myapp.example.com/openapi.json"
-    base_url: "https://api.myapp.example.com"
+  # Mirth API with multiple deployment instances
+  # All instances share the same API surface defined by swagger_url
+  - swagger_url: "https://mirth-prod.example.com/api/swagger.json"
     auth_type: "session"
-    session_endpoint: "https://api.myapp.example.com/login"
-    session_credentials:
-      username: "${MYAPP_USERNAME}"
-      password: "${MYAPP_PASSWORD}"
     session_cookie_name: "JSESSIONID"
-    is_read_only: false
+    session_endpoint: "/users/login"  # Path appended to each instance's base_url for authentication
+
+    # Define instances - each represents a different deployment
+    instances:
+      - instance_name: "prod"
+        base_url: "https://mirth-prod.example.com/api"
+        session_credentials:
+          username: "${MIRTH_PROD_USERNAME}"
+          password: "${MIRTH_PROD_PASSWORD}"
+        is_read_only: true        # Prevent destructive operations on production
+
+      - instance_name: "staging"
+        base_url: "https://mirth-staging.example.com/api"
+        session_credentials:
+          username: "${MIRTH_STAGING_USERNAME}"
+          password: "${MIRTH_STAGING_PASSWORD}"
+        is_read_only: false       # Allow modifications in staging
+
+      - instance_name: "dev"
+        base_url: "https://mirth-dev.example.com/api"
+        session_credentials:
+          username: "${MIRTH_DEV_USERNAME}"
+          password: "${MIRTH_DEV_PASSWORD}"
+        is_read_only: false       # Allow modifications in dev

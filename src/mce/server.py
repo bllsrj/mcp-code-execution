@@ -83,24 +83,35 @@ _BASE_INSTRUCTIONS = """\
 
 ## MANDATORY RULE
 
-**`get_functions` BEFORE writing code** — You MUST call `get_functions` before
-using any server function. Never write `from <server>.functions import <fn>`
-without first calling `get_functions` in the same session.
+**`get_functions` BEFORE writing code** — You MUST call `get_functions` to discover
+available endpoints before using any server function.
 
 ## Workflow (follow in order)
 
-1. **`list_servers`** — Discover available API servers and their function names.
+1. **`list_servers`** — Discover available API servers and their instances.
+   - Returns server names, descriptions, and instance information.
+   - Note which instances are read-only to avoid attempting destructive operations.
 
-2. **`get_functions`** — Fetch the signature, parameters, and return schema for
-   1–5 functions at once. The response includes a ready-to-use `import_statement`.
+2. **`get_functions`** — Get list of available functions for a server.
+   - Pass `server_name` and `read_only` boolean.
+   - If `read_only=True`, returns only GET methods (safe for read-only instances).
+   - If `read_only=False`, returns only write methods (POST, PUT, DELETE, PATCH).
+   - Returns function names, summaries, methods, and paths.
 
-3. **`execute_code`** — Run Python code in a sandboxed Docker container.
-   - Use the exact `import_statement` from `get_functions`.
+3. **`get_function_details`** — Get detailed signature for a specific function.
+   - Pass `server_name` and `function_name`.
+   - Returns parameters, types, response schema, usage example, and import statement.
+   - Use this to understand how to call specific functions before writing code.
+
+4. **`execute_code`** — Run Python code in a sandboxed Docker container.
+   - Use the exact `import_statement` from `get_function_details`.
+   - For multi-instance servers, pass `instance="instance_name"` as a keyword parameter
+     (e.g., `get_channels(instance="prod")` or `deploy_channel(instance="staging", ...)`).
    - Every dynamic value (city, ID, date, name…) MUST be a top-level variable.
    - `main()` takes NO arguments — it reads those top-level variables as globals.
    - NEVER hardcode any entity or value inside `main()`.
 
-4. **Reusable Function Library** — Build a persistent library of useful patterns:
+5. **Reusable Function Library** — Build a persistent library of useful patterns:
    - **`save_reusable_function`** — Save successful code for cross-session reuse.
      Use semantic names like "deploy_channels_batch" or "get_patient_vitals".
    - **`list_reusable_functions`** — Discover existing functions (sorted by popularity).
@@ -110,11 +121,26 @@ without first calling `get_functions` in the same session.
 
 ## Rules
 
-- NEVER guess function signatures. Always call `get_functions` first.
-- NEVER import a server module without the `import_statement` from `get_functions`.
+- NEVER guess function signatures. Always discover with `get_functions` first.
+- Call `get_function_details` for any function you plan to use to get the exact signature.
 - Keep `execute_code` payloads minimal — extract only the fields you need.
 - Save useful patterns to the reusable function library for future sessions.
-- If execution fails, re-read the `get_functions` output before retrying.
+- **API responses are automatically parsed** — XML responses are converted to Python dicts for easy navigation.
+
+## Multi-Instance Server Considerations
+
+When working with multi-instance servers (e.g., Mirth across prod/staging/dev):
+
+- **Instance-specific data**: Channels, channel IDs, configuration objects, and other
+  entities may differ between instances. A channel ID from prod will NOT work on staging.
+
+- **Read-only enforcement**: Some instances (typically production) are marked read-only.
+  Attempts to modify data on read-only instances will fail at runtime with a clear error.
+  Use `get_functions` with `read_only=True` to see only safe operations.
+
+- **Reusable functions are shared**: The reusable function library is shared across ALL
+  instances. When a saved function calls server APIs, you can pass different instance
+  names to target different environments with the same workflow.
 """
 
 
@@ -160,7 +186,7 @@ def _build_instructions(
 
     skills_blocks: list[str] = []
     for sn in servers_with_skills:
-        path = registry.skills_path(sn)
+        path = registry.skills_path()
         if path is not None:
             skills_blocks.append(f"### `{sn}`\n\n{path.read_text(encoding='utf-8')}")
 
@@ -205,7 +231,7 @@ def create_server(
 
     # Compute once; guard so a broken registry at startup doesn't crash the server.
     try:
-        servers_with_skills = [s.name for s in registry.list_servers() if registry.has_skills(s.name)]
+        servers_with_skills = ["mirth"] if registry.has_skills() else []
     except Exception:  # noqa: BLE001
         logger.warning("skills_discovery_failed")
         servers_with_skills = []
@@ -229,69 +255,89 @@ def create_server(
         _sandbox_libraries = []
 
     @mcp.tool()
-    async def list_servers() -> str:
-        """List all available API servers and their functions.
+    async def list_instances() -> str:
+        """List all available API instances.
 
-        Returns a compact overview of each server with:
-        - Server name and description
-        - List of available functions with one-line summaries
-
-        Use this to discover what APIs are available before getting function details.
+        Returns available instances (e.g., prod, staging, dev) with their read-only status.
+        Use this to discover which instances you can connect to.
         """
         try:
-            servers = registry.list_servers()
-            logger.info("tool_list_servers_called", server_count=len(servers))
+            instances = registry.list_instances()
+            logger.info("tool_list_instances_called", count=len(instances))
             return str(
                 _toon_encode(
                     {
                         "sandbox_libraries": _sandbox_libraries,
-                        "servers": [
+                        "instances": [
                             {
-                                "name": s.name,
-                                "description": s.description,
-                                "functions": [
-                                    {"name": fn, "summary": s.function_summaries.get(fn, "")} for fn in s.functions
-                                ],
+                                "instance_name": inst.instance_name,
+                                "is_read_only": inst.is_read_only,
                             }
-                            for s in servers
+                            for inst in instances
                         ],
                     }
                 )
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("list_servers_unexpected_error")
-            return str(_toon_encode({"error": "Internal error loading servers", "detail": str(exc)}))
+            logger.exception("list_instances_unexpected_error")
+            return str(_toon_encode({"error": "Internal error loading instances", "detail": str(exc)}))
 
     @mcp.tool()
-    async def get_functions(functions: list[dict[str, str]]) -> str:
-        """Get detailed function signatures and return schemas for 1–5 functions at once.
+    async def get_functions(read_only: bool) -> str:
+        """Get list of available functions, filtered by access type.
 
         Args:
-            functions: List of 1–5 items, each with:
-                - server_name: Name of the server (from list_servers).
-                - function_name: Name of the function to inspect.
+            read_only: If True, return only GET methods (safe for read-only instances).
+                      If False, return only write methods (POST, PUT, DELETE, PATCH).
 
-        Returns each function's parameters, types, and response data structure
-        so you can write Python code that calls them correctly.
-        Requesting more than 5 functions at once returns a validation error.
+        Returns a list of functions with their summaries, methods, and paths.
+        Use this to discover available endpoints before getting detailed signatures.
         """
-        if not functions:
-            return str(_toon_encode({"error": "Provide at least 1 function.", "error_type": "validation"}))
-        if len(functions) > 5:
-            return str(
-                _toon_encode({"error": "At most 5 functions can be requested at once.", "error_type": "validation"})
-            )
+        try:
+            # Filter functions by method type
+            functions = []
+            for fn_name in registry.list_function_names():
+                try:
+                    fn = registry.get_function(fn_name)
+                    is_get_method = fn.method.upper() == "GET"
 
-        results = []
-        for item in functions:
-            server_name = item.get("server_name", "")
-            function_name = item.get("function_name", "")
-            try:
-                fn = registry.get_function(server_name, function_name)
-                logger.info("tool_get_function_called", server=server_name, function=function_name)
-                results.append(
+                    # Include if: read_only=True and GET, OR read_only=False and not GET
+                    if read_only == is_get_method:
+                        functions.append(
+                            {
+                                "name": fn.function_name,
+                                "summary": fn.summary,
+                                "method": fn.method,
+                                "path": fn.path,
+                            }
+                        )
+                except Exception:  # noqa: BLE001
+                    # Skip functions that can't be loaded
+                    continue
+
+            logger.info("tool_get_functions_called", read_only=read_only, count=len(functions))
+            return str(_toon_encode({"read_only": read_only, "functions": functions}))
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("get_functions_unexpected_error")
+            return str(_toon_encode({"error": "Internal error", "error_type": "internal", "detail": str(exc)}))
+
+    @mcp.tool()
+    async def get_function_details(function_name: str) -> str:
+        """Get detailed signature and schema for a specific function.
+
+        Args:
+            function_name: Name of the function.
+
+        Returns detailed parameter types, response schema, and usage example.
+        Use this after discovering functions with get_functions to understand how to call them.
+        """
+        try:
+            fn = registry.get_function(function_name)
+            logger.info("tool_get_function_details_called", function=function_name)
+            return str(
+                _toon_encode(
                     {
-                        "server": server_name,
                         "function": fn.function_name,
                         "summary": fn.summary,
                         "method": fn.method,
@@ -300,39 +346,15 @@ def create_server(
                         "return_type": fn.return_type,
                         "response_fields": [r.model_dump() for r in fn.response_fields],
                         "usage_example": fn.source_code,
-                        "import_statement": f"from {server_name}.functions import {function_name}",
+                        "import_statement": "from mirth.functions import " + function_name,
                     }
                 )
-            except ServerNotFoundError as exc:
-                results.append(
-                    {
-                        "server": server_name,
-                        "function": function_name,
-                        "error": str(exc),
-                        "error_type": "server_not_found",
-                    }
-                )
-            except FunctionNotFoundError as exc:
-                results.append(
-                    {
-                        "server": server_name,
-                        "function": function_name,
-                        "error": str(exc),
-                        "error_type": "function_not_found",
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("get_function_unexpected_error")
-                results.append(
-                    {
-                        "server": server_name,
-                        "function": function_name,
-                        "error": "Internal error",
-                        "error_type": "internal",
-                        "detail": str(exc),
-                    }
-                )
-        return str(_toon_encode({"functions": results}))
+            )
+        except FunctionNotFoundError as exc:
+            return str(_toon_encode({"error": str(exc), "error_type": "function_not_found"}))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("get_function_details_unexpected_error")
+            return str(_toon_encode({"error": "Internal error", "error_type": "internal", "detail": str(exc)}))
 
     @mcp.tool()
     async def execute_code(code: str, description: str) -> dict[str, Any]:
@@ -438,7 +460,7 @@ def create_server(
                 "function": {
                     "name": func.name,
                     "description": func.description,
-                    "servers_used": func.servers_used,
+                    "instances_used": func.instances_used,
                     "times_used": func.times_used,
                 },
             }
@@ -476,7 +498,7 @@ def create_server(
                 "function": {
                     "name": func.name,
                     "description": func.description,
-                    "servers_used": func.servers_used,
+                    "instances_used": func.instances_used,
                     "times_used": func.times_used,
                 },
             }
@@ -491,21 +513,21 @@ def create_server(
             return {"success": False, "error": "Internal error occurred", "error_type": "internal"}
 
     @mcp.tool()
-    async def list_reusable_functions(server_filter: list[str] | None = None) -> str:
-        """List all reusable functions in the library, optionally filtered by server(s).
+    async def list_reusable_functions(instance_filter: list[str] | None = None) -> str:
+        """List all reusable functions in the library, optionally filtered by instance(s).
 
-        Returns functions sorted by popularity (times_used DESC). For single-server
-        filter, omits servers_used field since it's redundant.
+        Returns functions sorted by popularity (times_used DESC).
 
         Args:
-            server_filter: Optional list of server names to filter by (e.g., ["mirth"]).
+            instance_filter: Optional list of instance names to filter by (e.g., ["prod", "staging"]).
+                           Leave empty to see all reusable functions.
 
         Returns:
-            List of functions with name, description, times_used, last_used, servers_used.
+            List of functions with name, description, times_used, last_used, and which instances they've been used with.
         """
         try:
-            functions = await cache.list_reusable_functions(server_filter)
-            logger.info("tool_list_reusable_functions_called", count=len(functions), filter=server_filter)
+            functions = await cache.list_reusable_functions(instance_filter)
+            logger.info("tool_list_reusable_functions_called", count=len(functions), filter=instance_filter)
             return str(_toon_encode({"functions": functions}))
         except CacheError as exc:
             return str(_toon_encode({"error": f"Cache error: {exc}", "error_type": "cache"}))
@@ -647,7 +669,7 @@ def create_server(
         )
         def _get_skills() -> str:
             """Return the skills guide for this API server."""
-            skills_file = registry.skills_path(sn)
+            skills_file = registry.skills_path()
             if skills_file is None:
                 logger.debug("skills_resource_miss", server=sn)
                 return f"No skills documentation is available for server '{sn}'."

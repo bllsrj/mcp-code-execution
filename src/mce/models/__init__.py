@@ -65,24 +65,36 @@ class ServerSpec(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class SwaggerSource(BaseModel):
-    """Configuration for a single swagger/OpenAPI source."""
+class ServerInstance(BaseModel):
+    """Configuration for a specific deployment instance of an API server."""
 
-    name: str
-    swagger_url: str
+    instance_name: str
     base_url: str
-    auth_type: str = "jwt"
-    auth_header: str = ""
-    session_endpoint: str | None = None
     session_credentials: dict[str, str] = Field(default_factory=dict)
-    session_cookie_name: str | None = None
     is_read_only: bool = False
+
+
+class SwaggerSource(BaseModel):
+    """Configuration for API instances with shared OpenAPI spec.
+
+    All instances share the same API surface defined by swagger_url.
+    """
+
+    swagger_url: str
+
+    # Shared config across all instances
+    auth_type: str = "jwt"
+    session_endpoint: str | None = None
+    session_cookie_name: str | None = None
     extra_headers: dict[str, str] = Field(default_factory=dict)
     headers: str = ""  # "[key1:value1,key2:value2]" format; parsed into extra_headers
     skills_url: str | None = None  # Optional: local path or HTTP URL to a skills.md document
     top_level_functions: list[str] = Field(
         default_factory=list
     )  # Optional: function names to expose as direct MCP tools
+
+    # Instance definitions (required)
+    instances: list[ServerInstance] = Field(default_factory=list)
 
     @field_validator("auth_type")
     @classmethod
@@ -104,13 +116,23 @@ class SwaggerSource(BaseModel):
 
     @model_validator(mode="after")
     def validate_auth_fields(self) -> SwaggerSource:
-        """Ensure session auth has required fields."""
-        if self.auth_type == "session" and (
-            not self.session_endpoint or not self.session_credentials or not self.session_cookie_name
-        ):
-            raise ValueError(
-                "session auth requires session_endpoint, session_credentials, and session_cookie_name"
-            )
+        """Ensure session auth has required fields and instances are defined."""
+        if not self.instances:
+            raise ValueError("At least one instance must be defined")
+
+        # Validate session auth for each instance
+        if self.auth_type == "session":
+            if not self.session_cookie_name:
+                raise ValueError("Session auth requires session_cookie_name")
+            if not self.session_endpoint:
+                raise ValueError("Session auth requires session_endpoint")
+
+            for instance in self.instances:
+                if not instance.session_credentials:
+                    raise ValueError(
+                        f"Instance '{instance.instance_name}': session auth requires session_credentials"
+                    )
+
         return self
 
 
@@ -134,6 +156,14 @@ class FunctionInfo(BaseModel):
     path: str = ""
 
 
+class InstanceInfo(BaseModel):
+    """Instance information for list_servers response."""
+
+    instance_name: str
+    base_url: str
+    is_read_only: bool
+
+
 class ServerInfo(BaseModel):
     """Summary metadata for a compiled server (used in list_servers response)."""
 
@@ -141,6 +171,7 @@ class ServerInfo(BaseModel):
     description: str
     functions: list[str] = Field(default_factory=list)
     function_summaries: dict[str, str] = Field(default_factory=dict)
+    instances: list[InstanceInfo] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +201,7 @@ class ReusableFunction(BaseModel):
     name: str
     description: str
     code: str
-    servers_used: list[str] = Field(default_factory=list)
+    instances_used: list[str] = Field(default_factory=list)
     times_used: int = 1
     created_at: float
     last_used_at: float
@@ -204,3 +235,4 @@ class ServerManifest(BaseModel):
     base_url: str
     is_read_only: bool
     endpoints: list[EndpointManifest] = Field(default_factory=list)
+    instances: list[dict[str, Any]] = Field(default_factory=list)  # Simplified instance data for manifest

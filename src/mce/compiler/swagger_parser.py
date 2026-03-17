@@ -57,19 +57,23 @@ class SwaggerParser:
         description = self._extract_description()
         endpoints = self._parse_paths()
 
+        # Use first instance for base_url, but is_read_only is True only if ALL instances are read-only
+        first_instance = self._source.instances[0] if self._source.instances else None
+        base_url = first_instance.base_url if first_instance else ""
+        is_read_only = all(inst.is_read_only for inst in self._source.instances) if self._source.instances else False
+
         logger.info(
             "swagger_parsed",
-            server=self._source.name,
             total_endpoints=len(endpoints),
             swagger_hash=doc_hash[:12],
         )
 
         return ServerSpec(
-            name=self._source.name,
+            name="mirth",  # Hardcoded since there's only one API
             description=description,
-            base_url=self._source.base_url,
+            base_url=base_url,
             auth_type=self._source.auth_type,
-            is_read_only=self._source.is_read_only,
+            is_read_only=is_read_only,
             endpoints=endpoints,
             swagger_hash=doc_hash,
         )
@@ -143,10 +147,10 @@ class SwaggerParser:
         try:
             doc = yaml.safe_load(content)
             if not isinstance(doc, dict):
-                raise CompileError(f"Swagger document for {self._source.name} is not a mapping")
+                raise CompileError("Swagger document is not a mapping")
             return doc
         except yaml.YAMLError as exc:
-            raise CompileError(f"Failed to parse swagger YAML/JSON for {self._source.name}: {exc}") from exc
+            raise CompileError(f"Failed to parse swagger YAML/JSON: {exc}") from exc
 
     def _extract_description(self) -> str:
         """Extract server description from swagger info block.
@@ -155,7 +159,7 @@ class SwaggerParser:
             Description string, or server name if not present.
         """
         info = self._raw_doc.get("info", {})
-        return str(info.get("description", info.get("title", self._source.name)))
+        return str(info.get("description", info.get("title", "API")))
 
     def _parse_paths(self) -> list[EndpointSpec]:
         """Parse all paths in the swagger document.
@@ -195,7 +199,7 @@ class SwaggerParser:
                     skipped += 1
 
         if skipped:
-            logger.info("endpoints_skipped", server=self._source.name, count=skipped)
+            logger.info("endpoints_skipped", count=skipped)
 
         return endpoints
 
@@ -217,8 +221,10 @@ class SwaggerParser:
         Returns:
             EndpointSpec if parseable, None to skip.
         """
-        # Skip read-only violations
-        if self._source.is_read_only and method.lower() in _MUTATING_METHODS:
+        # Skip read-only violations only if ALL instances are read-only
+        # If at least one instance allows writes, we need to compile the endpoint
+        all_readonly = all(inst.is_read_only for inst in self._source.instances) if self._source.instances else False
+        if all_readonly and method.lower() in _MUTATING_METHODS:
             logger.debug("skipped_readonly_method", path=path, method=method)
             return None
 
@@ -389,11 +395,14 @@ class SwaggerParser:
             List of ResponseField objects.
         """
         content = response.get("content", {})
-        # Prefer application/json; fall back to */* or first available content type
-        json_content: dict[str, Any] = (
-            content.get("application/json") or content.get("*/*") or next(iter(content.values()), {})
+        # Prefer application/xml (cleaner for Mirth); fall back to JSON, then */* or first available
+        response_content: dict[str, Any] = (
+            content.get("application/xml")
+            or content.get("application/json")
+            or content.get("*/*")
+            or next(iter(content.values()), {})
         )
-        json_schema = json_content.get("schema", {})
+        json_schema = response_content.get("schema", {})
 
         if "$ref" in json_schema:
             resolved = self._resolve_ref(json_schema["$ref"])

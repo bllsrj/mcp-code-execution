@@ -301,7 +301,7 @@ servers:
     swagger_url: "https://api.myapp.example.com/openapi.json"
     base_url: "https://api.myapp.example.com"
     auth_type: "session"
-    session_endpoint: "https://api.myapp.example.com/login"
+    session_endpoint: "/login"          # Path appended to base_url
     session_credentials:
       username: "${MYAPP_USERNAME}"     # Resolved from env
       password: "${MYAPP_PASSWORD}"     # Resolved from env
@@ -309,24 +309,72 @@ servers:
     is_read_only: false
 ```
 
+**Multi-Instance Configuration (Same API, Multiple Deployments):**
+
+For servers deployed across multiple environments (prod/staging/dev) with identical API surfaces:
+
+```yaml
+servers:
+  - name: mirth
+    swagger_url: "https://mirth-prod.example.com/api/swagger.json"
+    auth_type: "session"
+    session_cookie_name: "JSESSIONID"
+    session_endpoint: "/users/login"   # Shared path for all instances
+
+    # Define multiple instances with different base URLs and credentials
+    instances:
+      - instance_name: "prod"
+        base_url: "https://mirth-prod.example.com/api"
+        session_credentials:
+          username: "${MIRTH_PROD_USERNAME}"
+          password: "${MIRTH_PROD_PASSWORD}"
+        is_read_only: true              # Prevent destructive operations
+
+      - instance_name: "staging"
+        base_url: "https://mirth-staging.example.com/api"
+        session_credentials:
+          username: "${MIRTH_STAGING_USERNAME}"
+          password: "${MIRTH_STAGING_PASSWORD}"
+        is_read_only: false
+
+      - instance_name: "dev"
+        base_url: "https://mirth-dev.example.com/api"
+        session_credentials:
+          username: "${MIRTH_DEV_USERNAME}"
+          password: "${MIRTH_DEV_PASSWORD}"
+        is_read_only: false
+```
+
+The LLM can target specific instances: `get_channels(instance="prod")` or `deploy_channel(instance="staging", ...)`.
+
 **How Session Auth Works:**
 
-1. On the first API call, MCE authenticates to `session_endpoint` with `session_credentials`
+1. On the first API call, MCE authenticates to `base_url + session_endpoint` with `session_credentials`
 2. Extracts the specified cookie from the response headers
-3. Caches the session cookie for the duration of code execution
+3. Caches the session cookie per instance for the duration of code execution
 4. Injects the cookie into all subsequent API requests via the `Cookie` header
-5. Session state is cleared after execution completes (no cross-execution leakage)
+5. Automatically re-authenticates on 401 (Unauthorized) responses
+6. Session state is cleared after execution completes (no cross-execution leakage)
 
-**Session Auth Environment Variables:**
+**Multi-Instance Environment Variables:**
 
-The compiler generates these env vars for session-authenticated servers:
+The compiler generates these env vars for multi-instance servers:
 
-- `MCE_{SERVER}_SESSION_ENDPOINT` — Login endpoint URL
-- `MCE_{SERVER}_SESSION_USERNAME` — Username credential
-- `MCE_{SERVER}_SESSION_PASSWORD` — Password credential
-- `MCE_{SERVER}_SESSION_COOKIE_NAME` — Cookie name to extract (e.g. `JSESSIONID`)
+**Server-level (shared):**
+- `MCE_{SERVER}_SESSION_ENDPOINT` — Login endpoint path
+- `MCE_{SERVER}_SESSION_COOKIE_NAME` — Cookie name to extract
+
+**Instance-level (per deployment):**
+- `MCE_{SERVER}_{INSTANCE}_BASE_URL` — Instance base URL
+- `MCE_{SERVER}_{INSTANCE}_SESSION_USERNAME` — Username credential
+- `MCE_{SERVER}_{INSTANCE}_SESSION_PASSWORD` — Password credential
+- `MCE_{SERVER}_{INSTANCE}_IS_READ_ONLY` — Read-only flag (optional)
 
 > `extra_headers` are serialized to `MCE_{SERVER}_EXTRA_HEADERS` (JSON string) at compile time and injected into every generated function call.
+
+**XML Response Handling:**
+
+MCE prefers XML responses when available in the OpenAPI spec (e.g., for Mirth APIs). XML responses are automatically parsed using `xmltodict` and converted to Python dictionaries, making them easy for the LLM to navigate. No manual XML parsing required.
 
 ### Server Skills
 

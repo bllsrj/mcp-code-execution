@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-async def integrated_cache(tmp_path: Path, test_config: MCEConfig) -> CacheStore:
+async def integrated_cache(tmp_path: Path, mce_config: MCEConfig) -> CacheStore:
     """Create cache with real executor integration."""
     cache = CacheStore(
         db_path=str(tmp_path / "integration.db"),
@@ -26,7 +26,7 @@ async def integrated_cache(tmp_path: Path, test_config: MCEConfig) -> CacheStore
     await cache.initialize()
 
     # Create executor and wire it up
-    executor = CodeExecutor(test_config, cache)
+    executor = CodeExecutor(mce_config, cache)
     cache.set_executor(executor)
 
     return cache
@@ -96,32 +96,32 @@ async def test_overwrite_updates_function(integrated_cache: CacheStore) -> None:
     assert func_v2.description == "version 2"
 
 
-async def test_list_filters_by_server(integrated_cache: CacheStore) -> None:
-    """List functions filtered by server usage."""
+async def test_list_filters_by_instance(integrated_cache: CacheStore) -> None:
+    """List functions filtered by instance usage."""
     await integrated_cache.save_reusable_function(
-        "mirth_func",
-        "Mirth function",
-        "from mirth.functions import get_channels\nresult = get_channels()",
+        "prod_func",
+        "Prod function",
+        'from mirth.functions import get_channels\nresult = get_channels(instance="prod")',
     )
 
     await integrated_cache.save_reusable_function(
-        "weather_func",
-        "Weather function",
-        "from weather.functions import get_forecast\nresult = get_forecast()",
+        "staging_func",
+        "Staging function",
+        'from mirth.functions import get_forecast\nresult = get_forecast(instance="staging")',
     )
 
     await integrated_cache.save_reusable_function(
         "multi_func",
-        "Multi-server function",
-        "from mirth.functions import x\nfrom weather.functions import y\nresult = x() + y()",
+        "Multi-instance function",
+        'from mirth.functions import x\nx(instance="prod")\nx(instance="staging")',
     )
 
-    # Filter by mirth only
-    mirth_funcs = await integrated_cache.list_reusable_functions(server_filter=["mirth"])
-    names = {f["name"] for f in mirth_funcs}
-    assert "mirth_func" in names
+    # Filter by prod only
+    prod_funcs = await integrated_cache.list_reusable_functions(instance_filter=["prod"])
+    names = {f["name"] for f in prod_funcs}
+    assert "prod_func" in names
     assert "multi_func" in names
-    assert "weather_func" not in names
+    assert "staging_func" not in names
 
 
 async def test_usage_statistics_sorting(integrated_cache: CacheStore) -> None:
@@ -144,15 +144,15 @@ async def test_usage_statistics_sorting(integrated_cache: CacheStore) -> None:
     assert names[2] == "func_b"  # 1 use
 
 
-async def test_auto_prune_on_capacity(tmp_path: Path, test_config: MCEConfig) -> None:
-    """Auto-pruning removes least-used functions when at capacity."""
+async def test_auto_prune_on_capacity(tmp_path: Path, mce_config: MCEConfig) -> None:
+    """Auto-pruning removes least-used functions when enforcing capacity."""
     cache = CacheStore(
         db_path=str(tmp_path / "prune_test.db"),
-        max_functions=3,
+        max_functions=10,  # High enough to not auto-prune during saves
         ttl_days=30,
     )
     await cache.initialize()
-    executor = CodeExecutor(test_config, cache)
+    executor = CodeExecutor(mce_config, cache)
     cache.set_executor(executor)
 
     # Add 5 functions
@@ -163,11 +163,13 @@ async def test_auto_prune_on_capacity(tmp_path: Path, test_config: MCEConfig) ->
     await cache.increment_usage("func_4", "result = 4")
     await cache.increment_usage("func_4", "result = 4")
 
-    # Auto-prune to cap of 3
-    result = await cache.auto_prune(cap=3)
+    # Manually enforce cap of 3
+    deleted = await cache.enforce_global_cap(limit=3)
+    assert deleted == 2
 
-    # Should have deleted 2 least-used
-    assert result["cap_deleted"] == 2
+    # Should now have 3 functions
+    functions = await cache.list_reusable_functions()
+    assert len(functions) == 3
 
     # func_4 should still exist (most used)
     func_4 = await cache.get_reusable_function("func_4")
@@ -175,21 +177,21 @@ async def test_auto_prune_on_capacity(tmp_path: Path, test_config: MCEConfig) ->
     assert func_4.times_used == 3
 
 
-async def test_server_detection_auto_updates(integrated_cache: CacheStore) -> None:
-    """Server detection automatically updates on each execution."""
-    # Start with single server
-    code1 = "from mirth.functions import x\nresult = x()"
+async def test_instance_detection_auto_updates(integrated_cache: CacheStore) -> None:
+    """Instance detection automatically updates on each execution."""
+    # Start with single instance
+    code1 = 'from mirth.functions import x\nresult = x(instance="prod")'
     await integrated_cache.save_reusable_function("func", "test", code1)
 
     func = await integrated_cache.get_reusable_function("func")
     assert func is not None
-    assert func.servers_used == ["mirth"]
+    assert func.instances_used == ["prod"]
 
-    # Run with additional server
-    code2 = "from mirth.functions import x\nfrom weather.functions import y\nresult = x() + y()"
+    # Run with additional instance
+    code2 = 'from mirth.functions import x\nx(instance="prod")\nx(instance="staging")'
     await integrated_cache.increment_usage("func", code2)
 
     func = await integrated_cache.get_reusable_function("func")
     assert func is not None
-    # Should merge both servers
-    assert set(func.servers_used) == {"mirth", "weather"}
+    # Should merge both instances
+    assert set(func.instances_used) == {"prod", "staging"}

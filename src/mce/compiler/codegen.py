@@ -335,11 +335,12 @@ class CodeGenerator:
         self._env.globals["swagger_type_to_python"] = _swagger_type_to_python
         self._env.globals["safe_name"] = _safe_name
 
-    def generate(self, spec: ServerSpec) -> str:
+    def generate(self, spec: ServerSpec, default_instance: str = "") -> str:
         """Generate Python source code for the given ServerSpec.
 
         Args:
             spec: Compiled server specification.
+            default_instance: Default instance name to use (usually the server name or first instance).
 
         Returns:
             Generated Python source code as a string.
@@ -359,6 +360,7 @@ class CodeGenerator:
                 base_url=spec.base_url,
                 auth_type=spec.auth_type,
                 is_read_only=spec.is_read_only,
+                default_instance=default_instance or spec.name,
                 functions=functions_data,
                 header_desc_width=header_desc_width,
             )
