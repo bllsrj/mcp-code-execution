@@ -55,8 +55,8 @@ def build_server_env_vars(server_name: str) -> dict[str, str]:
     # Scan all environment variables for this server
     for key, value in os.environ.items():
         if key.startswith(prefix):
-            # Pass through all server-related env vars
-            env_vars[key] = value
+            # Resolve any ${VAR_NAME} references in the value
+            env_vars[key] = resolve_env_references(value)
 
     return env_vars
 

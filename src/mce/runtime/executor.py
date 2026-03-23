@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -22,6 +24,8 @@ logger = get_logger(__name__)
 # Maximum bytes of container output to read
 _MAX_OUTPUT_BYTES = 1_048_576  # 1MB
 
+# Pattern to detect `from {server}.functions import …` statements in user code
+_SERVER_IMPORT_RE = re.compile(r"from\s+(\w+)\.functions\s+import")
 
 class CodeExecutor:
     """Manages the full execution pipeline: validate → lint → sandbox → cache."""
@@ -69,16 +73,26 @@ class CodeExecutor:
         if self._config.lint_enabled:
             self._lint_code(code)
 
+        # Detect which servers are used so we can pass the right env vars
+        servers_used = self._detect_servers_used(code)
+
         # Build complete execution code with compiled dir in sys.path
-        execution_code = self._build_execution_code(code)
+        execution_code = self._build_execution_code(code, servers_used)
 
         # Run in Docker sandbox
-        raw_output = self._run_in_docker(execution_code)
+        raw_output = self._run_in_docker(execution_code, servers_used)
 
         elapsed_ms = int(time.time() * 1000) - start_ms
 
         # Parse output
         result = self._parse_output(raw_output, elapsed_ms)
+
+        # Store in cache on success (if enabled)
+        cache_id: str | None = None
+        if result.success and self._config.cache_enabled:
+            with contextlib.suppress(Exception):
+                cache_id = await self._cache.store(code, description)  # type: ignore[attr-defined]
+        result.cache_id = cache_id
 
         logger.info(
             "code_executed",
@@ -151,11 +165,23 @@ class CodeExecutor:
     # Container-side mount point for the compiled server functions
     _CONTAINER_COMPILED_PATH = "/mce_compiled"
 
-    def _build_execution_code(self, user_code: str) -> str:
+    def _detect_servers_used(self, code: str) -> list[str]:
+        """Detect which server modules are imported in the user code.
+
+        Args:
+            code: Python source code.
+
+        Returns:
+            Sorted list of server module names found in import statements.
+        """
+        return sorted(set(_SERVER_IMPORT_RE.findall(code)))
+
+    def _build_execution_code(self, user_code: str, servers_used: list[str] | None = None) -> str:
         """Build complete execution payload with sys.path injection.
 
         Args:
             user_code: User-provided Python code.
+            servers_used: List of server module names (used for documentation/logging).
 
         Returns:
             Complete Python code ready for execution in sandbox.
@@ -166,11 +192,12 @@ _sys.path.insert(0, {self._CONTAINER_COMPILED_PATH!r})
 """
         return f"{path_injection}\n{user_code}"
 
-    def _run_in_docker(self, code: str) -> str:
+    def _run_in_docker(self, code: str, servers_used: list[str] | None = None) -> str:
         """Execute code in an isolated Docker container via CLI stdin pipe.
 
         Args:
             code: Complete Python code to execute.
+            servers_used: Server module names whose credentials to inject as env vars.
 
         Returns:
             Raw stdout output from the container.
@@ -179,8 +206,7 @@ _sys.path.insert(0, {self._CONTAINER_COMPILED_PATH!r})
             ExecutionTimeoutError: If execution exceeds configured timeout.
             ExecutionError: On Docker errors or non-zero exit code.
         """
-        # Always pass mirth credentials (all instances)
-        env_vars = build_all_server_env_vars(["mirth"])
+        env_vars = build_all_server_env_vars(servers_used or [])
         logger.debug("docker_execute_start", image=self._config.docker_image)
 
         cmd = ["docker"]
@@ -245,6 +271,40 @@ _sys.path.insert(0, {self._CONTAINER_COMPILED_PATH!r})
             )
 
         return stdout
+
+    def _compute_swagger_hash(self, server_names: list[str]) -> str:
+        """Compute a combined hash from the manifest swagger_hash values.
+
+        Args:
+            server_names: List of server module names.
+
+        Returns:
+            Combined swagger hash string, "unknown" if servers exist but no manifests,
+            or "no-servers" if the list is empty.
+        """
+        if not server_names:
+            return "no-servers"
+
+        hashes: list[str] = []
+        for name in server_names:
+            manifest_path = self._compiled_dir / name / "manifest.json"
+            if manifest_path.exists():
+                try:
+                    import json  # noqa: PLC0415
+
+                    with open(manifest_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                    hashes.append(data.get("swagger_hash", ""))
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if not hashes:
+            return "unknown"
+
+        import hashlib  # noqa: PLC0415
+
+        combined = hashlib.sha256("".join(hashes).encode()).hexdigest()[:16]
+        return combined
 
     def _parse_output(self, raw_output: str, elapsed_ms: int) -> ExecutionResult:
         """Parse Docker container stdout into an ExecutionResult.

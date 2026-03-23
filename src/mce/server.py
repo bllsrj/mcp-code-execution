@@ -186,7 +186,7 @@ def _build_instructions(
 
     skills_blocks: list[str] = []
     for sn in servers_with_skills:
-        path = registry.skills_path()
+        path = registry.skills_path(sn)
         if path is not None:
             skills_blocks.append(f"### `{sn}`\n\n{path.read_text(encoding='utf-8')}")
 
@@ -231,7 +231,7 @@ def create_server(
 
     # Compute once; guard so a broken registry at startup doesn't crash the server.
     try:
-        servers_with_skills = ["mirth"] if registry.has_skills() else []
+        servers_with_skills = [s.name for s in registry.list_servers() if registry.has_skills(s.name)]
     except Exception:  # noqa: BLE001
         logger.warning("skills_discovery_failed")
         servers_with_skills = []
@@ -255,38 +255,46 @@ def create_server(
         _sandbox_libraries = []
 
     @mcp.tool()
-    async def list_instances() -> str:
-        """List all available API instances.
+    async def list_servers() -> str:
+        """List all available API servers and their instances.
 
-        Returns available instances (e.g., prod, staging, dev) with their read-only status.
-        Use this to discover which instances you can connect to.
+        Returns server names, descriptions, instance information, and read-only status.
+        Use this to discover available API servers before calling get_functions.
         """
         try:
-            instances = registry.list_instances()
-            logger.info("tool_list_instances_called", count=len(instances))
+            servers = registry.list_servers()
+            logger.info("tool_list_servers_called", count=len(servers))
             return str(
                 _toon_encode(
                     {
                         "sandbox_libraries": _sandbox_libraries,
-                        "instances": [
+                        "servers": [
                             {
-                                "instance_name": inst.instance_name,
-                                "is_read_only": inst.is_read_only,
+                                "name": srv.name,
+                                "description": srv.description,
+                                "instances": [
+                                    {
+                                        "instance_name": inst.instance_name,
+                                        "is_read_only": inst.is_read_only,
+                                    }
+                                    for inst in srv.instances
+                                ],
                             }
-                            for inst in instances
+                            for srv in servers
                         ],
                     }
                 )
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("list_instances_unexpected_error")
-            return str(_toon_encode({"error": "Internal error loading instances", "detail": str(exc)}))
+            logger.exception("list_servers_unexpected_error")
+            return str(_toon_encode({"error": "Internal error loading servers", "detail": str(exc)}))
 
     @mcp.tool()
-    async def get_functions(read_only: bool) -> str:
-        """Get list of available functions, filtered by access type.
+    async def get_functions(server_name: str, read_only: bool) -> str:
+        """Get list of available functions for a server, filtered by access type.
 
         Args:
+            server_name: Name of the API server.
             read_only: If True, return only GET methods (safe for read-only instances).
                       If False, return only write methods (POST, PUT, DELETE, PATCH).
 
@@ -294,11 +302,20 @@ def create_server(
         Use this to discover available endpoints before getting detailed signatures.
         """
         try:
+            # Validate server exists and get its function list
+            servers = registry.list_servers()
+            server_info = next((s for s in servers if s.name == server_name), None)
+            if server_info is None:
+                return str(_toon_encode({
+                    "error": f"Server '{server_name}' not found",
+                    "error_type": "server_not_found",
+                }))
+
             # Filter functions by method type
             functions = []
-            for fn_name in registry.list_function_names():
+            for fn_name in server_info.functions:
                 try:
-                    fn = registry.get_function(fn_name)
+                    fn = registry.get_function(server_name, fn_name)
                     is_get_method = fn.method.upper() == "GET"
 
                     # Include if: read_only=True and GET, OR read_only=False and not GET
@@ -315,26 +332,29 @@ def create_server(
                     # Skip functions that can't be loaded
                     continue
 
-            logger.info("tool_get_functions_called", read_only=read_only, count=len(functions))
-            return str(_toon_encode({"read_only": read_only, "functions": functions}))
+            logger.info("tool_get_functions_called", server=server_name, read_only=read_only, count=len(functions))
+            return str(_toon_encode({"server": server_name, "read_only": read_only, "functions": functions}))
 
+        except ServerNotFoundError as exc:
+            return str(_toon_encode({"error": str(exc), "error_type": "server_not_found"}))
         except Exception as exc:  # noqa: BLE001
             logger.exception("get_functions_unexpected_error")
             return str(_toon_encode({"error": "Internal error", "error_type": "internal", "detail": str(exc)}))
 
     @mcp.tool()
-    async def get_function_details(function_name: str) -> str:
+    async def get_function_details(server_name: str, function_name: str) -> str:
         """Get detailed signature and schema for a specific function.
 
         Args:
+            server_name: Name of the API server.
             function_name: Name of the function.
 
         Returns detailed parameter types, response schema, and usage example.
         Use this after discovering functions with get_functions to understand how to call them.
         """
         try:
-            fn = registry.get_function(function_name)
-            logger.info("tool_get_function_details_called", function=function_name)
+            fn = registry.get_function(server_name, function_name)
+            logger.info("tool_get_function_details_called", server=server_name, function=function_name)
             return str(
                 _toon_encode(
                     {
@@ -346,10 +366,12 @@ def create_server(
                         "return_type": fn.return_type,
                         "response_fields": [r.model_dump() for r in fn.response_fields],
                         "usage_example": fn.source_code,
-                        "import_statement": "from mirth.functions import " + function_name,
+                        "import_statement": f"from {fn.server_name}.functions import {function_name}",
                     }
                 )
             )
+        except ServerNotFoundError as exc:
+            return str(_toon_encode({"error": str(exc), "error_type": "server_not_found"}))
         except FunctionNotFoundError as exc:
             return str(_toon_encode({"error": str(exc), "error_type": "function_not_found"}))
         except Exception as exc:  # noqa: BLE001
@@ -669,7 +691,7 @@ def create_server(
         )
         def _get_skills() -> str:
             """Return the skills guide for this API server."""
-            skills_file = registry.skills_path()
+            skills_file = registry.skills_path(sn)
             if skills_file is None:
                 logger.debug("skills_resource_miss", server=sn)
                 return f"No skills documentation is available for server '{sn}'."

@@ -77,17 +77,31 @@ class ServerInstance(BaseModel):
 
 
 class SwaggerSource(BaseModel):
-    """Configuration for API instances with shared OpenAPI spec.
+    """Configuration for an API server with its OpenAPI spec and auth settings.
 
-    All instances share the same API surface defined by swagger_url.
+    Supports both single-instance (top-level base_url / credentials) and
+    multi-instance (instances list) deployments.  All instances share the same
+    API surface defined by swagger_url.
     """
 
+    # Required fields
+    name: str
     swagger_url: str
+    base_url: str = ""
 
-    # Shared config across all instances
+    # Server-level flags
+    is_read_only: bool = False
     auth_type: str = "jwt"
+
+    # JWT auth — top-level auth header value (may contain ${ENV_VAR} references)
+    auth_header: str = ""
+
+    # Session auth — shared across all instances
     session_endpoint: str | None = None
     session_cookie_name: str | None = None
+    # Top-level session credentials (used when no instances are defined)
+    session_credentials: dict[str, str] = Field(default_factory=dict)
+
     extra_headers: dict[str, str] = Field(default_factory=dict)
     headers: str = ""  # "[key1:value1,key2:value2]" format; parsed into extra_headers
     skills_url: str | None = None  # Optional: local path or HTTP URL to a skills.md document
@@ -95,7 +109,7 @@ class SwaggerSource(BaseModel):
         default_factory=list
     )  # Optional: function names to expose as direct MCP tools
 
-    # Instance definitions (required)
+    # Optional multi-instance definitions
     instances: list[ServerInstance] = Field(default_factory=list)
 
     @field_validator("auth_type")
@@ -118,22 +132,18 @@ class SwaggerSource(BaseModel):
 
     @model_validator(mode="after")
     def validate_auth_fields(self) -> SwaggerSource:
-        """Ensure session auth has required fields and instances are defined."""
-        if not self.instances:
-            raise ValueError("At least one instance must be defined")
-
-        # Validate session auth for each instance
+        """Ensure session auth has all required fields."""
         if self.auth_type == "session":
             if not self.session_cookie_name:
-                raise ValueError("Session auth requires session_cookie_name")
+                raise ValueError("session auth requires session_cookie_name")
             if not self.session_endpoint:
-                raise ValueError("Session auth requires session_endpoint")
+                raise ValueError("session auth requires session_endpoint")
 
-            for instance in self.instances:
-                if not instance.session_credentials:
-                    raise ValueError(
-                        f"Instance '{instance.instance_name}': session auth requires session_credentials"
-                    )
+            # Credentials must be supplied either at top level or per instance
+            has_top_level_creds = bool(self.session_credentials)
+            has_instance_creds = any(inst.session_credentials for inst in self.instances)
+            if not has_top_level_creds and not has_instance_creds:
+                raise ValueError("session auth requires session_credentials")
 
         return self
 
@@ -190,6 +200,7 @@ class ExecutionResult(BaseModel):
     traceback: str | None = None  # Only populated in debug mode
     prints: str | None = None  # Captured stdout from print() calls in user code
     execution_time_ms: int = 0
+    cache_id: str | None = None  # Set when execution result is stored in the code cache
 
 
 # ---------------------------------------------------------------------------

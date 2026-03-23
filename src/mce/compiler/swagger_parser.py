@@ -57,10 +57,19 @@ class SwaggerParser:
         description = self._extract_description()
         endpoints = self._parse_paths()
 
-        # Use first instance for base_url, but is_read_only is True only if ALL instances are read-only
-        first_instance = self._source.instances[0] if self._source.instances else None
-        base_url = first_instance.base_url if first_instance else ""
-        is_read_only = all(inst.is_read_only for inst in self._source.instances) if self._source.instances else False
+        # Resolve base_url: use source-level base_url, or fall back to first instance
+        if self._source.base_url:
+            base_url = self._source.base_url
+        elif self._source.instances:
+            base_url = self._source.instances[0].base_url
+        else:
+            base_url = ""
+
+        # Resolve is_read_only: use source-level flag, or True only if ALL instances are read-only
+        if self._source.instances:
+            is_read_only = all(inst.is_read_only for inst in self._source.instances)
+        else:
+            is_read_only = self._source.is_read_only
 
         logger.info(
             "swagger_parsed",
@@ -69,7 +78,7 @@ class SwaggerParser:
         )
 
         return ServerSpec(
-            name="mirth",  # Hardcoded since there's only one API
+            name=self._source.name,
             description=description,
             base_url=base_url,
             auth_type=self._source.auth_type,
@@ -221,10 +230,12 @@ class SwaggerParser:
         Returns:
             EndpointSpec if parseable, None to skip.
         """
-        # Skip read-only violations only if ALL instances are read-only
-        # If at least one instance allows writes, we need to compile the endpoint
-        all_readonly = all(inst.is_read_only for inst in self._source.instances) if self._source.instances else False
-        if all_readonly and method.lower() in _MUTATING_METHODS:
+        # Skip mutating methods when the source or all its instances are read-only
+        if self._source.instances:
+            is_readonly = all(inst.is_read_only for inst in self._source.instances)
+        else:
+            is_readonly = self._source.is_read_only
+        if is_readonly and method.lower() in _MUTATING_METHODS:
             logger.debug("skipped_readonly_method", path=path, method=method)
             return None
 
