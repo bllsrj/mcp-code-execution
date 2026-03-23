@@ -237,8 +237,10 @@ class SwaggerParser:
         parameters = self._parse_parameters(all_params)
 
         request_body_schema: dict[str, Any] | None = None
+        request_content_types: list[str] = []
         if method in ("POST", "PUT", "PATCH"):
             request_body_schema = self._parse_request_body(operation.get("requestBody", {}))
+            request_content_types = self._extract_request_content_types(operation.get("requestBody", {}))
 
         response_schema = self._parse_response_schema(operation.get("responses", {}))
         response_content_types = self._extract_response_content_types(operation.get("responses", {}))
@@ -255,6 +257,7 @@ class SwaggerParser:
             description=description[:1000],
             parameters=parameters,
             request_body_schema=request_body_schema,
+            request_content_types=request_content_types,
             response_schema=response_schema,
             tags=operation.get("tags", []),
             base_url=op_base_url,
@@ -423,6 +426,39 @@ class SwaggerParser:
                 return content_types
 
         return []
+
+    def _extract_request_content_types(self, request_body: dict[str, Any]) -> list[str]:
+        """Extract available request content types from requestBody object.
+
+        Prefers XML, then JSON, then other formats. Returns all available types
+        in priority order: ["application/xml"] or ["application/json"] or
+        whatever is available.
+
+        Args:
+            request_body: RequestBody object from swagger operation.
+
+        Returns:
+            List of content types, empty if no request body found.
+        """
+        if not request_body or not isinstance(request_body, dict):
+            return []
+
+        content = request_body.get("content", {})
+        if not content:
+            return []
+
+        # Build priority list: XML first, then JSON, then others
+        content_types: list[str] = []
+        if "application/xml" in content:
+            content_types.append("application/xml")
+        if "application/json" in content:
+            content_types.append("application/json")
+        # Add any other types (except already added)
+        for ct in content.keys():
+            if ct not in content_types:
+                content_types.append(ct)
+
+        return content_types
 
     def _extract_response_fields(self, response: dict[str, Any]) -> list[ResponseField]:
         """Extract field list from a single response object.

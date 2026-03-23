@@ -43,6 +43,7 @@ class EndpointSpec(BaseModel):
     description: str = ""
     parameters: list[ParamSchema] = Field(default_factory=list)
     request_body_schema: dict[str, Any] | None = None
+    request_content_types: list[str] = Field(default_factory=list)  # Available request content types, e.g., ["application/xml", "application/json"]
     response_schema: list[ResponseField] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     base_url: str = ""  # Override base URL for this endpoint (from operation-level servers)

@@ -168,6 +168,25 @@ def _build_accept_header(content_types: list[str]) -> str:
     return ", ".join(content_types)
 
 
+def _build_content_type_header(content_types: list[str]) -> str:
+    """Build a Content-Type header string from available request content types.
+
+    Prefers XML, then JSON, then other formats. If no types are documented,
+    defaults to application/json (safe default for REST APIs).
+
+    Args:
+        content_types: List of available request content types (e.g., ["application/xml", "application/json"]).
+
+    Returns:
+        Content-Type header value string (e.g., "application/xml" or "application/json").
+    """
+    if not content_types:
+        # No content types documented: default to JSON (safe REST default)
+        return "application/json"
+    # Use first (preferred) content type
+    return content_types[0]
+
+
 def _request(
     method: str,
     path: str,
@@ -176,6 +195,7 @@ def _request(
     params: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
     accept_header: str | None = None,
+    content_type: str | None = None,
 ) -> Any:
     """Execute an HTTP request against the {{ server_name }} API for specified instance.
 
@@ -187,6 +207,7 @@ def _request(
         params: Optional query parameters.
         json_body: Optional JSON request body.
         accept_header: Optional Accept header value for content negotiation.
+        content_type: Optional Content-Type header value for the request body.
 
     Returns:
         Parsed JSON response.
@@ -217,11 +238,16 @@ def _request(
                 qs = f"{qs}&{encoded_key}={encoded_val}" if qs else f"{encoded_key}={encoded_val}"
         url = f"{url}?{qs}"
 
+    # Build headers with content-type if body is present
+    headers = _headers(instance, accept_header=accept_header)
+    if json_body and content_type:
+        headers["Content-Type"] = content_type
+
     # Make request with automatic retry on 401 (session expired)
     r = httpx.request(
         method,
         url,
-        headers=_headers(instance, accept_header=accept_header),
+        headers=headers,
         json=json_body,
         timeout=15.0,
         verify=False,
@@ -314,6 +340,11 @@ def {{ fn.name }}({% if fn.signature %}{{ fn.signature }}, *, {% endif %}instanc
         json_body=None,
         {% endif %}
         accept_header=_build_accept_header({{ fn.response_content_types }}),
+        {% if fn.has_body %}
+        content_type=_build_content_type_header({{ fn.request_content_types }}),
+        {% else %}
+        content_type=None,
+        {% endif %}
     )
 
 {% endfor %}
