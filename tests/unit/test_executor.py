@@ -344,3 +344,72 @@ def test_compute_swagger_hash_no_servers_returns_no_servers(tmp_path: Path) -> N
     executor = CodeExecutor(config, _make_mock_cache())
     result = executor._compute_swagger_hash([])
     assert result == "no-servers"
+
+
+# ---------------------------------------------------------------------------
+# _detect_servers_used
+# ---------------------------------------------------------------------------
+
+
+def test_detect_servers_used_finds_imports(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    executor = CodeExecutor(config, _make_mock_cache())
+    code = "from weather.functions import get_current_weather\nresult = get_current_weather()"
+    servers = executor._detect_servers_used(code)
+    assert "weather" in servers
+
+
+def test_detect_servers_used_multiple(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    executor = CodeExecutor(config, _make_mock_cache())
+    code = "from weather.functions import fn\nfrom hotel.functions import fn2\nresult = 1"
+    servers = executor._detect_servers_used(code)
+    assert set(servers) == {"weather", "hotel"}
+
+
+def test_detect_servers_used_empty_code(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    executor = CodeExecutor(config, _make_mock_cache())
+    assert executor._detect_servers_used("result = 42") == []
+
+
+# ---------------------------------------------------------------------------
+# _compute_swagger_hash
+# ---------------------------------------------------------------------------
+
+
+def test_compute_swagger_hash_with_manifest(tmp_path: Path) -> None:
+    """Returns a hash string when manifest exists."""
+    import json  # noqa: PLC0415
+    config = _make_config(tmp_path)
+    executor = CodeExecutor(config, _make_mock_cache())
+
+    server_dir = tmp_path / "compiled" / "weather"
+    server_dir.mkdir(parents=True)
+    (server_dir / "manifest.json").write_text(
+        json.dumps({"swagger_hash": "abc123"}), encoding="utf-8"
+    )
+    result = executor._compute_swagger_hash(["weather"])
+    assert isinstance(result, str)
+    assert len(result) > 0
+    assert result not in ("no-servers", "unknown")
+
+
+async def test_execute_cache_stores_on_success(tmp_path: Path) -> None:
+    """On successful execution with cache enabled, cache.store is called."""
+    config = _make_config(tmp_path)
+    config.cache_enabled = True
+    cache = _make_mock_cache()
+    executor = CodeExecutor(config, cache)
+
+    docker_output = json.dumps({"success": True, "data": {"result": 42}})
+    docker_result = MagicMock()
+    docker_result.returncode = 0
+    docker_result.stdout = docker_output.encode()
+    docker_result.stderr = b""
+
+    with patch("subprocess.run", return_value=docker_result):
+        result = await executor.execute("result = 42", "test")
+
+    assert result.success is True
+    cache.store.assert_awaited_once()

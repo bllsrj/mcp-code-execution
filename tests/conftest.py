@@ -33,7 +33,6 @@ def weather_swagger_source() -> SwaggerSource:
         name="weather",
         swagger_url=str(FIXTURES_DIR / "weather_api.yaml"),
         base_url="https://api.weather.example.com/v1",
-        auth_header="",
         is_read_only=True,
     )
 
@@ -45,7 +44,6 @@ def hotel_swagger_source() -> SwaggerSource:
         name="hotel",
         swagger_url=str(FIXTURES_DIR / "hotel_api.yaml"),
         base_url="https://api.hotel.example.com/v2",
-        auth_header="Authorization: Bearer test-token",
         is_read_only=False,
     )
 
@@ -57,7 +55,6 @@ def petstore_swagger_source() -> SwaggerSource:
         name="petstore",
         swagger_url=str(FIXTURES_DIR / "petstore.yaml"),
         base_url="https://petstore.example.com/v1",
-        auth_header="",
         is_read_only=False,
     )
 

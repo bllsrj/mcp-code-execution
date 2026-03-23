@@ -432,3 +432,103 @@ def test_skills_path_returns_none_when_file_absent(tmp_path: Path) -> None:
     registry = Registry(str(tmp_path))
     registry.load()
     assert registry.skills_path("weather") is None
+
+
+# ---------------------------------------------------------------------------
+# Multi-server tests
+# ---------------------------------------------------------------------------
+
+
+def test_list_instances_returns_all_instances(tmp_path: Path) -> None:
+    """list_instances returns instances from all servers."""
+    ep = {
+        "function_name": "fn",
+        "summary": "s",
+        "method": "GET",
+        "path": "/p",
+        "parameters_summary": "",
+        "response_summary": "",
+    }
+    _make_manifest(tmp_path, server_name="weather", endpoints=[ep])
+    manifest_path = tmp_path / "weather" / "manifest.json"
+    with open(manifest_path) as f:
+        data = json.load(f)
+    data["instances"] = [{"instance_name": "prod", "base_url": "https://prod.weather.com", "is_read_only": True}]
+    with open(manifest_path, "w") as f:
+        json.dump(data, f)
+
+    registry = Registry(str(tmp_path))
+    registry.load()
+    instances = registry.list_instances()
+    assert any(i.instance_name == "prod" for i in instances)
+
+
+def test_list_function_names_all_servers(tmp_path: Path) -> None:
+    """list_function_names with no arg returns functions from all servers."""
+    _make_manifest(tmp_path, server_name="weather")
+    hotel_ep = {
+        "function_name": "book_room",
+        "summary": "Book",
+        "method": "POST",
+        "path": "/book",
+        "parameters_summary": "",
+        "response_summary": "",
+    }
+    _make_manifest(tmp_path, server_name="hotel", endpoints=[hotel_ep])
+    registry = Registry(str(tmp_path))
+    registry.load()
+    names = registry.list_function_names()
+    assert "get_current_weather" in names
+    assert "book_room" in names
+
+
+def test_get_function_raises_server_not_found_on_empty_registry(tmp_path: Path) -> None:
+    registry = Registry(str(tmp_path))
+    registry.load()
+    with pytest.raises(ServerNotFoundError):
+        registry.get_function("nonexistent", "fn")
+
+
+def test_get_function_source_raises_server_not_found(tmp_path: Path) -> None:
+    registry = Registry(str(tmp_path))
+    registry.load()
+    with pytest.raises(ServerNotFoundError):
+        registry.get_function_source("ghost", "fn")
+
+
+def test_get_swagger_hash_empty_registry_raises(tmp_path: Path) -> None:
+    registry = Registry(str(tmp_path))
+    registry.load()
+    with pytest.raises(ServerNotFoundError):
+        registry.get_swagger_hash("nonexistent")
+
+
+def test_has_skills_no_server_arg_returns_false_when_empty(tmp_path: Path) -> None:
+    _make_manifest(tmp_path, server_name="weather")
+    registry = Registry(str(tmp_path))
+    registry.load()
+    assert registry.has_skills() is False
+
+
+def test_has_skills_no_server_arg_returns_true_when_file_exists(tmp_path: Path) -> None:
+    _make_manifest(tmp_path, server_name="weather")
+    (tmp_path / "weather" / "skills.md").write_text("# Skills", encoding="utf-8")
+    registry = Registry(str(tmp_path))
+    registry.load()
+    assert registry.has_skills() is True
+
+
+def test_skills_path_no_server_arg_returns_none_when_empty(tmp_path: Path) -> None:
+    registry = Registry(str(tmp_path))
+    registry.load()
+    assert registry.skills_path() is None
+
+
+def test_skills_path_no_server_arg_returns_first_found(tmp_path: Path) -> None:
+    _make_manifest(tmp_path, server_name="aaa")
+    (tmp_path / "aaa" / "skills.md").write_text("# Skills aaa", encoding="utf-8")
+    registry = Registry(str(tmp_path))
+    registry.load()
+    path = registry.skills_path()
+    assert path is not None
+    assert "aaa" in str(path)

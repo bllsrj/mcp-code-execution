@@ -684,3 +684,371 @@ def test_create_server_instructions_mention_direct_tools(tmp_path: Path) -> None
     instructions = mcp.instructions or ""
     assert "Direct API Tools" in instructions
     assert "my_direct_tool" in instructions
+
+
+# ---------------------------------------------------------------------------
+# save_reusable_function tool
+# ---------------------------------------------------------------------------
+
+
+def _make_reusable_function():  # type: ignore[no-untyped-def]
+    """Build a mock ReusableFunction."""
+    import time  # noqa: PLC0415
+
+    from mce.models import ReusableFunction  # noqa: PLC0415
+    now = time.time()
+    return ReusableFunction(
+        name="get_weather",
+        description="Get weather data",
+        code="result = 42",
+        instances_used=["prod"],
+        times_used=1,
+        created_at=now,
+        last_used_at=now,
+    )
+
+
+async def test_save_reusable_function_success(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.save_reusable_function = AsyncMock(return_value=_make_reusable_function())
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(
+        mcp, "save_reusable_function", name="get_weather", description="Get weather", code="result = 42"
+    )
+    assert result["success"] is True
+    assert result["function"]["name"] == "get_weather"
+
+
+async def test_save_reusable_function_duplicate_raises(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.save_reusable_function = AsyncMock(side_effect=ValueError("already exists"))
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "save_reusable_function", name="dup", description="d", code="result = 1")
+    assert result["success"] is False
+    assert result["error_type"] == "validation"
+
+
+async def test_save_reusable_function_cache_error(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.save_reusable_function = AsyncMock(side_effect=CacheError("db error"))
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "save_reusable_function", name="fn", description="d", code="result = 1")
+    assert result["success"] is False
+    assert result["error_type"] == "cache"
+
+
+# ---------------------------------------------------------------------------
+# overwrite_reusable_function tool
+# ---------------------------------------------------------------------------
+
+
+async def test_overwrite_reusable_function_success(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.overwrite_reusable_function = AsyncMock(return_value=_make_reusable_function())
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(
+        mcp, "overwrite_reusable_function",
+        name="get_weather", description="updated", code="result = 1", reason="improved"
+    )
+    assert result["success"] is True
+
+
+async def test_overwrite_reusable_function_not_found(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.overwrite_reusable_function = AsyncMock(side_effect=ValueError("not found"))
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(
+        mcp, "overwrite_reusable_function",
+        name="missing", description="d", code="r=1", reason="r"
+    )
+    assert result["success"] is False
+    assert result["error_type"] == "validation"
+
+
+# ---------------------------------------------------------------------------
+# list_reusable_functions tool
+# ---------------------------------------------------------------------------
+
+
+async def test_list_reusable_functions_returns_list(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.list_reusable_functions = AsyncMock(
+        return_value=[{"name": "fn1", "description": "d", "times_used": 1, "last_used": "just now"}]
+    )
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = _toon_decode(await _call_tool(mcp, "list_reusable_functions"))
+    assert "functions" in result
+    assert len(result["functions"]) == 1
+
+
+async def test_list_reusable_functions_with_filter(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.list_reusable_functions = AsyncMock(return_value=[])
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = _toon_decode(await _call_tool(mcp, "list_reusable_functions", instance_filter=["prod"]))
+    assert "functions" in result
+
+
+# ---------------------------------------------------------------------------
+# run_reusable_function tool
+# ---------------------------------------------------------------------------
+
+
+async def test_run_reusable_function_success(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    func = _make_reusable_function()
+    cache.get_reusable_function = AsyncMock(return_value=func)
+    cache.increment_usage = AsyncMock()
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    exec_result = ExecutionResult(success=True, data={"val": 1}, execution_time_ms=50)
+    with patch("mce.runtime.executor.CodeExecutor.execute", new=AsyncMock(return_value=exec_result)):
+        result = await _call_tool(mcp, "run_reusable_function", name="get_weather")
+
+    assert result["success"] is True
+
+
+async def test_run_reusable_function_not_found(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.get_reusable_function = AsyncMock(return_value=None)
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "run_reusable_function", name="ghost")
+    assert result["success"] is False
+    assert result["error_type"] == "not_found"
+
+
+async def test_run_reusable_function_with_params(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    func = _make_reusable_function()
+    cache.get_reusable_function = AsyncMock(return_value=func)
+    cache.increment_usage = AsyncMock()
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    exec_result = ExecutionResult(success=True, data="ok", execution_time_ms=10)
+    with patch("mce.runtime.executor.CodeExecutor.execute", new=AsyncMock(return_value=exec_result)):
+        result = await _call_tool(mcp, "run_reusable_function", name="get_weather", params={"city": "London"})
+
+    assert result["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# delete_reusable_function tool
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_reusable_function_success(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.delete_reusable_function = AsyncMock(return_value=True)
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "delete_reusable_function", name="old_fn", reason="obsolete")
+    assert result["success"] is True
+
+
+async def test_delete_reusable_function_not_found(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.delete_reusable_function = AsyncMock(return_value=False)
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "delete_reusable_function", name="ghost", reason="test")
+    assert result["success"] is False
+    assert result["error_type"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# reusable_code_guide prompt
+# ---------------------------------------------------------------------------
+
+
+async def test_reusable_code_guide_prompt(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    prompt = await mcp.get_prompt("reusable_code_guide")
+    messages = prompt.fn()
+    assert messages is not None
+    assert "Reusable Function Library Guide" in str(messages)
+
+
+# ---------------------------------------------------------------------------
+# Error path coverage for reusable function tools
+# ---------------------------------------------------------------------------
+
+
+async def test_save_reusable_function_compile_error(tmp_path: Path) -> None:
+    from mce.errors import CompileError  # noqa: PLC0415
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.save_reusable_function = AsyncMock(side_effect=CompileError("syntax error"))
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "save_reusable_function", name="fn", description="d", code="bad code")
+    assert result["success"] is False
+    assert result["error_type"] == "validation"
+
+
+async def test_save_reusable_function_unexpected_error(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.save_reusable_function = AsyncMock(side_effect=RuntimeError("unexpected"))
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "save_reusable_function", name="fn", description="d", code="r=1")
+    assert result["success"] is False
+    assert result["error_type"] == "internal"
+
+
+async def test_overwrite_reusable_function_unexpected_error(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.overwrite_reusable_function = AsyncMock(side_effect=RuntimeError("db crash"))
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "overwrite_reusable_function", name="fn", description="d", code="r=1", reason="r")
+    assert result["success"] is False
+    assert result["error_type"] == "internal"
+
+
+async def test_list_reusable_functions_cache_error(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.list_reusable_functions = AsyncMock(side_effect=CacheError("db error"))
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = _toon_decode(await _call_tool(mcp, "list_reusable_functions"))
+    assert "error" in result
+    assert result["error_type"] == "cache"
+
+
+async def test_run_reusable_function_cache_error(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.get_reusable_function = AsyncMock(side_effect=CacheError("db error"))
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "run_reusable_function", name="fn")
+    assert result["success"] is False
+    assert result["error_type"] == "cache"
+
+
+async def test_run_reusable_function_security_violation(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    func = _make_reusable_function()
+    cache.get_reusable_function = AsyncMock(return_value=func)
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    with patch("mce.runtime.executor.CodeExecutor.execute", new=AsyncMock(side_effect=SecurityViolationError("bad"))):
+        result = await _call_tool(mcp, "run_reusable_function", name="get_weather")
+
+    assert result["success"] is False
+    assert result["error_type"] == "security"
+
+
+async def test_run_reusable_function_execution_error(tmp_path: Path) -> None:
+    from mce.errors import ExecutionError  # noqa: PLC0415
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    func = _make_reusable_function()
+    cache.get_reusable_function = AsyncMock(return_value=func)
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    with patch(
+        "mce.runtime.executor.CodeExecutor.execute",
+        new=AsyncMock(side_effect=ExecutionError("crash", stderr="oom", exit_code=137)),
+    ):
+        result = await _call_tool(mcp, "run_reusable_function", name="get_weather")
+
+    assert result["success"] is False
+    assert result["error_type"] == "execution"
+
+
+async def test_delete_reusable_function_cache_error(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    cache = _make_mock_cache()
+    cache.delete_reusable_function = AsyncMock(side_effect=CacheError("db error"))
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = await _call_tool(mcp, "delete_reusable_function", name="fn", reason="test")
+    assert result["success"] is False
+    assert result["error_type"] == "cache"
+
+
+async def test_get_functions_unexpected_error(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    registry.list_servers.side_effect = RuntimeError("registry explode")
+    cache = _make_mock_cache()
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = _toon_decode(await _call_tool(mcp, "get_functions", server_name="weather", read_only=True))
+    assert "error" in result
+
+
+async def test_get_function_details_unexpected_error(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _make_mock_registry()
+    registry.get_function.side_effect = RuntimeError("db crash")
+    cache = _make_mock_cache()
+    mcp = create_server(config, registry=registry, cache=cache)
+
+    result = _toon_decode(await _call_tool(mcp, "get_function_details", server_name="weather", function_name="fn"))
+    assert "error" in result
+    assert result["error_type"] == "internal"
+
+
+async def test_initialize_server_with_prune(tmp_path: Path) -> None:
+    """initialize_server logs prune results when items are deleted."""
+    config = _make_config(tmp_path)
+    (tmp_path / "compiled").mkdir(parents=True)
+    from fastmcp import FastMCP  # noqa: PLC0415
+
+    mcp = FastMCP(name="test")
+
+    with patch("mce.runtime.cache.CacheStore.initialize", new=AsyncMock()), patch(
+        "mce.runtime.cache.CacheStore.auto_prune",
+        new=AsyncMock(return_value={"old_deleted": 2, "cap_deleted": 1}),
+    ):
+        await initialize_server(config, mcp)
